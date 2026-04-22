@@ -1,0 +1,148 @@
+---
+title: "IHC Cell Detection Using StarDist Color Deconvolution"
+description: "Apply StarDist nucleus detection to IHC-stained slides using color deconvolution preprocessing to convert RGB stains to single-channel input."
+---
+
+Immunohistochemistry (IHC) images are brightfield RGB images, but most pre-trained StarDist models expect a single fluorescence-like channel. The challenge is that IHC stains — typically a haematoxylin counterstain and a chromogen such as DAB — are mixed together in the RGB pixel values. Color deconvolution mathematically separates these mixed stains into individual channels, giving you a clean single-channel haematoxylin image that a fluorescence-trained model can interpret correctly. The bundled `StarDistDeconvolved.groovy` script demonstrates this preprocessing pipeline.
+
+## How color deconvolution solves the RGB problem
+
+Color deconvolution uses the known optical absorbance vectors (stain vectors) of each dye to unmix the RGB image into separate stain channels. Once deconvolved, you can extract just the haematoxylin channel — which highlights nuclei — and pass it to a single-channel StarDist model. This means you can apply a model trained on fluorescence data to any brightfield IHC staining combination, without retraining.
+
+## Complete script
+
+The following script is taken directly from `StarDistDeconvolved.groovy`. You must set color deconvolution stains on the image in QuPath before running — see [defining stain vectors](#defining-stain-vectors) below.
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.scripting.QP
+import qupath.opencv.ops.ImageOps
+
+// IMPORTANT! Replace this with the path to your StarDist model
+// that takes a single channel as input (e.g. dsb2018_heavy_augment.pb)
+// You can find some at https://github.com/qupath/models
+// (Check credit & reuse info before downloading)
+def modelPath = "/path/to/model.pb"
+
+// Get current image - assumed to have color deconvolution stains set
+var imageData = QP.getCurrentImageData()
+var stains = imageData.getColorDeconvolutionStains()
+
+// Customize how the StarDist detection should be applied
+// Here some reasonable default options are specified
+def stardist = StarDist2D
+    .builder(modelPath)
+    .preprocess( // Extra preprocessing steps, applied sequentially (per-tile)
+        ImageOps.Channels.deconvolve(stains), // Color deconvolution
+        ImageOps.Channels.extract(0),         // Extract the first stain (indexing starts at 0)
+        ImageOps.Filters.median(2)           // Apply a small median filter (optional!)
+    )
+    .normalizePercentiles(1, 99) // Percentile normalization
+    .threshold(0.5)              // Probability (detection) threshold
+    .pixelSize(0.5)              // Resolution for detection
+    .cellExpansion(5)            // Expand nuclei to approximate cell boundaries
+    .measureShape()              // Add shape measurements
+    .measureIntensity()          // Add cell measurements (in all compartments)
+    .build()
+
+// Define which objects will be used as the 'parents' for detection
+// Use QP.getAnnotationObjects() if you want to use all annotations, rather than selected objects
+def pathObjects = QP.getSelectedObjects()
+
+// Run detection for the selected objects
+if (pathObjects.isEmpty()) {
+    QP.getLogger().error("No parent objects are selected!")
+    return
+}
+stardist.detectObjects(imageData, pathObjects)
+stardist.close() // This can help clean up & regain memory
+println('Done!')
+```
+
+## Preprocessing chain explained
+
+The `.preprocess()` method accepts a sequence of `ImageOp` operations that are applied in order to each tile before inference. For IHC, three operations are chained together:
+
+<Steps>
+  <Step title="ImageOps.Channels.deconvolve(stains)">
+    Applies color deconvolution using the stain vectors stored in the image's `ColorDeconvolutionStains` object. The output is a multi-channel image where each channel corresponds to one deconvolved stain (e.g. channel 0 = haematoxylin, channel 1 = DAB, channel 2 = residual).
+
+    The stain vectors must be set on the image before running the script — either by using QuPath's **Analyze > Estimate stain vectors** tool, or by entering known stain vectors manually.
+  </Step>
+  <Step title="ImageOps.Channels.extract(0)">
+    Extracts a single channel from the deconvolved output. Index `0` corresponds to the first stain (haematoxylin in a standard H-DAB setup). The result is a single-channel image that the fluorescence-trained StarDist model can accept.
+
+    To extract DAB instead (for DAB-stained nuclei), use `ImageOps.Channels.extract(1)`.
+  </Step>
+  <Step title="ImageOps.Filters.median(2)">
+    Applies a median filter with radius 2 pixels to reduce small artifacts introduced by the deconvolution step. This step is optional — the comment in the source notes it with `// Apply a small median filter (optional!)`. Omit it if you prefer unsmoothed output or if processing speed is a concern.
+  </Step>
+</Steps>
+
+## Defining stain vectors
+
+Color deconvolution requires stain vectors that describe the optical characteristics of each dye in your staining protocol. QuPath stores these vectors on the image and makes them available via `imageData.getColorDeconvolutionStains()`.
+
+<Tabs>
+  <Tab title="Estimate automatically">
+    1. Open the image in QuPath.
+    2. Go to **Analyze > Estimate stain vectors**.
+    3. Follow the prompts to select representative pixels for each stain.
+    4. QuPath saves the estimated vectors with the image data.
+
+    <Tip>
+      Automatic estimation works best when you select pixels that clearly show a single stain — for example, a nucleus-dense area for haematoxylin and a DAB-positive cell for the chromogen.
+    </Tip>
+  </Tab>
+  <Tab title="Enter manually">
+    If you have known stain vectors from the literature or a calibration slide, enter them directly:
+
+    1. Go to **Image > Edit stain vectors**.
+    2. Enter the RGB absorbance values for each stain.
+    3. Save. The script will read these values via `imageData.getColorDeconvolutionStains()`.
+  </Tab>
+</Tabs>
+
+<Warning>
+  If `imageData.getColorDeconvolutionStains()` returns `null` (i.e. no stains have been set), the deconvolution step will fail at runtime. Always verify that stain vectors are configured on the image before running this script.
+</Warning>
+
+## Cell expansion for DAB intensity measurement
+
+`.cellExpansion(5)` expands each detected nucleus outward by 5 microns. For IHC analysis this is particularly useful because many markers of interest (membrane receptors, cytoplasmic proteins) are expressed outside the nucleus. With cell expansion active, `.measureIntensity()` reports statistics for the nucleus, cytoplasm, and whole cell compartments separately — so you can quantify DAB signal in the cytoplasm independently of the haematoxylin counterstain in the nucleus.
+
+<Tip>
+  For IHC, consider adding `.cellConstrainScale(1.5)` to limit how far cells can expand relative to their nucleus size. This prevents very large expanded regions in sparsely cellular areas, which can introduce DAB measurements from neighbouring cells or extracellular space:
+
+  ```groovy
+  .cellExpansion(5)
+  .cellConstrainScale(1.5)
+  ```
+
+  The scale factor of `1.5` means the expanded cell boundary cannot exceed 1.5× the nucleus radius. Adjust this value based on the expected cell size in your tissue.
+</Tip>
+
+## Cleanup
+
+Call `stardist.close()` after detection to release model memory.
+
+```groovy
+stardist.close() // This can help clean up & regain memory
+```
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="H&E detection" icon="droplet" href="/guides/he-detection">
+    Direct RGB detection for H&E slides without preprocessing
+  </Card>
+  <Card title="Fluorescence detection" icon="circle-dot" href="/guides/fluorescence-detection">
+    Single-channel detection with DAPI or other nuclear fluorescence stains
+  </Card>
+  <Card title="Cell expansion" icon="expand" href="/guides/cell-expansion">
+    Detailed guide to nucleus expansion, Voronoi overlap resolution, and constrain scale
+  </Card>
+  <Card title="API reference" icon="code" href="/api/stardist2d">
+    Full StarDist2D builder API documentation
+  </Card>
+</CardGroup>

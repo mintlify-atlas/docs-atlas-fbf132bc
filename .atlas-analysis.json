@@ -1,0 +1,104 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "QuPath StarDist Extension",
+  "projectDescription": "A QuPath extension that enables 2D nucleus and cell detection using the StarDist deep learning model, supporting H&E, fluorescence, and IHC images.",
+  "theme": "palm",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/he-detection",
+              "guides/fluorescence-detection",
+              "guides/ihc-detection",
+              "guides/global-normalization",
+              "guides/cell-expansion",
+              "guides/bioimage-model-zoo"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/builder-options",
+              "reference/normalization",
+              "reference/measurements",
+              "reference/troubleshooting",
+              "changelog"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Classes",
+            "pages": [
+              "api/stardist2d",
+              "api/opcreators",
+              "api/stardist-bioimageio"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "2D nucleus detection using StarDist star-convex polygon model",
+    "Fluent builder API for flexible configuration",
+    "Support for H&E (RGB), fluorescence, and IHC images via preprocessing ops",
+    "Global image normalization to avoid tile-boundary artifacts",
+    "Cell expansion beyond nucleus boundary with optional Voronoi overlap resolution",
+    "BioImage Model Zoo YAML spec auto-configuration",
+    "Per-object intensity and shape measurements",
+    "Multi-threaded tile-based inference with GPU memory management",
+    "Bundled Groovy script templates for common use cases"
+  ],
+  "publicApiSurface": [
+    "StarDist2D.builder(String modelPath)",
+    "StarDist2D.builder(DnnModel dnn)",
+    "StarDist2D.imageNormalizationBuilder()",
+    "StarDist2D.detectObjects(ImageData, Collection<PathObject>)",
+    "StarDist2D.detectObjects(ImageData, PathObject, boolean)",
+    "StarDist2D.detectObjects(ImageData, ROI)",
+    "StarDist2D.close()",
+    "StarDist2D.Builder.threshold(double)",
+    "StarDist2D.Builder.channels(int...)",
+    "StarDist2D.Builder.channels(String...)",
+    "StarDist2D.Builder.channels(ColorTransform...)",
+    "StarDist2D.Builder.preprocess(ImageOp...)",
+    "StarDist2D.Builder.preprocessGlobal(TileOpCreator)",
+    "StarDist2D.Builder.normalizePercentiles(double, double)",
+    "StarDist2D.Builder.pixelSize(double)",
+    "StarDist2D.Builder.tileSize(int)",
+    "StarDist2D.Builder.padding(int)",
+    "StarDist2D.Builder.cellExpansion(double)",
+    "StarDist2D.Builder.cellConstrainScale(double)",
+    "StarDist2D.Builder.measureShape()",
+    "StarDist2D.Builder.measureIntensity()",
+    "StarDist2D.Builder.classify(String)",
+    "StarDist2D.Builder.createAnnotations()",
+    "StarDist2D.Builder.nThreads(int)",
+    "StarDist2D.Builder.build()",
+    "OpCreators.imageNormalizationBuilder()",
+    "OpCreators.ImageNormalizationBuilder.percentiles(double, double)",
+    "OpCreators.ImageNormalizationBuilder.zeroMeanUnitVariance()",
+    "OpCreators.ImageNormalizationBuilder.perChannel(boolean)",
+    "OpCreators.ImageNormalizationBuilder.maxDimension(int)",
+    "OpCreators.ImageNormalizationBuilder.build()"
+  ]
+}

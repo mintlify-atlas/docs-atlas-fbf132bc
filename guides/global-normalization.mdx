@@ -1,0 +1,191 @@
+---
+title: 'Global Image Normalization for StarDist in QuPath WSIs'
+description: 'Avoid tile-boundary normalization artifacts in large WSIs by computing percentile or zero-mean statistics across the full downsampled image.'
+---
+
+When StarDist processes a whole-slide image (WSI), it divides the image into tiles and runs the model on each one independently. By default, normalization is also applied per tile — meaning a dark corner tile and a bright center tile can be normalized to entirely different intensity ranges. On large WSIs this produces visible seams at tile boundaries and can cause the model to detect false positives or miss real cells in regions that happen to be unusually bright or dark. Global normalization solves this by computing a single set of statistics (percentiles or mean/variance) from a downsampled version of the full image, then applying those fixed values as an offset and scale to every tile uniformly.
+
+## Why tile-boundary artifacts occur
+
+StarDist's default `.normalizePercentiles()` method is a per-tile operation. It maps each tile's own min/max percentiles to `[0, 1]`, so the normalization factors differ tile by tile. For fluorescence images with variable background, or H&E slides with regions of varying stain density, this means adjacent tiles can end up at very different effective brightness levels after normalization. The model then interprets those differences as intensity variation rather than as the same tissue, leading to boundary artifacts.
+
+<Warning>
+The `.normalizePercentiles()` builder method is applied on a per-tile basis. The QuPath source explicitly warns: "This can result in artifacts and false detections without background/constant regions." For WSIs, prefer `.preprocessGlobal()` instead.
+</Warning>
+
+## Global normalization strategies
+
+Two strategies are available through `StarDist2D.imageNormalizationBuilder()`: percentile normalization and zero-mean unit variance normalization. Both compute statistics from a single downsampled read of the image (or annotation region) and then produce fixed `subtract` and `multiply` ops that are applied identically to every tile.
+
+<Tabs>
+  <Tab title="Percentile normalization">
+    Percentile normalization calculates the pixel value at the `min` and `max` percentiles across the downsampled image, then scales intensity so that range maps to `[0, 1]`. This is the same approach as per-tile normalization but computed once globally.
+
+    ```groovy
+    def normalizer = StarDist2D.imageNormalizationBuilder()
+        .percentiles(0, 99.8)   // 0th and 99.8th percentile
+        .maxDimension(4096)     // downsample until max(width, height) <= 4096
+        .perChannel(false)      // compute statistics across all channels jointly
+        .build()
+    ```
+
+    The `(0, 99.8)` pair is the conventional StarDist default: the 0th percentile is the minimum pixel value and the 99.8th clips extreme bright outliers, which is important for fluorescence where a few saturated pixels would otherwise dominate the range.
+  </Tab>
+  <Tab title="Zero-mean unit variance">
+    Zero-mean unit variance normalization subtracts the global mean and divides by the global standard deviation, so the resulting values are centred at zero with a spread of ~1. This matches the preprocessing used by many BioImage Model Zoo models.
+
+    ```groovy
+    def normalizer = StarDist2D.imageNormalizationBuilder()
+        .zeroMeanUnitVariance()
+        .maxDimension(4096)
+        .perChannel(true)       // compute mean/std per channel independently
+        .build()
+    ```
+  </Tab>
+</Tabs>
+
+## Full code pattern
+
+The following example is taken directly from the `StarDistTemplate.groovy` script shipped with the extension. It shows how to wire a global normalizer into the builder using `.preprocessGlobal()`.
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.scripting.QP
+
+def modelPath = "/path/to/model.pb"
+
+def stardist = StarDist2D
+    .builder(modelPath)
+    .preprocessGlobal(                 // Apply normalization across the whole image
+        StarDist2D.imageNormalizationBuilder()
+            .maxDimension(4096)        // Downsample so max(width, height) <= 4096
+            .percentiles(0, 99.8)      // Percentiles for normalization
+            .build()
+    )
+    .threshold(0.5)
+    .pixelSize(0.5)
+    .tileSize(1024)
+    .cellExpansion(5.0)
+    .cellConstrainScale(1.5)
+    .measureShape()
+    .measureIntensity()
+    .build()
+
+def pathObjects = QP.getSelectedObjects()
+def imageData = QP.getCurrentImageData()
+if (pathObjects.isEmpty()) {
+    QP.getLogger().error("No parent objects are selected!")
+    return
+}
+stardist.detectObjects(imageData, pathObjects)
+stardist.close()
+println('Done!')
+```
+
+## Key options
+
+<AccordionGroup>
+  <Accordion title=".maxDimension(int)">
+    Controls how aggressively the image is downsampled before computing normalization statistics. If you do not call `.downsample()` explicitly, the extension calculates a downsample factor automatically so that `max(width, height) <= maxDimension`. The default is `2048`; the template uses `4096` for a better-quality statistics estimate on very large slides.
+
+    ```groovy
+    .maxDimension(4096)
+    ```
+
+    A higher value means less downsampling, which gives more accurate statistics but uses more memory. A value of `1` (full resolution) will almost certainly exhaust memory on a WSI.
+  </Accordion>
+
+  <Accordion title=".perChannel(boolean)">
+    When `true`, normalization statistics are computed separately for each channel; when `false` (the default), statistics are pooled across all channels jointly.
+
+    ```groovy
+    .perChannel(true)   // each channel normalized independently
+    .perChannel(false)  // all channels share a single scale factor
+    ```
+
+    Per-channel normalization is usually preferable for multi-channel fluorescence images where channels can span very different intensity ranges. For RGB brightfield images, joint normalization (`false`) is often fine.
+  </Accordion>
+
+  <Accordion title=".useMask(boolean)">
+    When `true`, the statistics are computed only within the annotation ROI that serves as the detection parent, rather than over the entire image. This is useful when large non-tissue regions (such as slide background or air) would otherwise skew the percentiles.
+
+    ```groovy
+    StarDist2D.imageNormalizationBuilder()
+        .percentiles(0, 99.8)
+        .useMask(true)
+        .build()
+    ```
+  </Accordion>
+
+  <Accordion title=".downsample(double)">
+    Explicitly sets the downsample factor instead of deriving it from `.maxDimension()`. Useful when you know the slide dimensions in advance and want reproducible, fixed downsampling.
+
+    ```groovy
+    .downsample(16)   // use 1/16th resolution for statistics computation
+    ```
+
+    Values below `1.0` are not meaningful; for a WSI, any value that would load the full slide into memory will fail.
+  </Accordion>
+</AccordionGroup>
+
+## Global vs local normalization
+
+<Tabs>
+  <Tab title="Global (recommended for WSIs)">
+    ```groovy
+    // Statistics computed once from the full downsampled image.
+    // Every tile receives the same offset and scale.
+    def stardist = StarDist2D
+        .builder(modelPath)
+        .preprocessGlobal(
+            StarDist2D.imageNormalizationBuilder()
+                .percentiles(0, 99.8)
+                .maxDimension(4096)
+                .build()
+        )
+        .threshold(0.5)
+        .pixelSize(0.5)
+        .build()
+    ```
+  </Tab>
+  <Tab title="Local (per-tile, default)">
+    ```groovy
+    // Statistics recomputed for each tile independently.
+    // Can cause seam artifacts at tile boundaries on large slides.
+    def stardist = StarDist2D
+        .builder(modelPath)
+        .normalizePercentiles(0, 99.8)
+        .threshold(0.5)
+        .pixelSize(0.5)
+        .build()
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+For small images (e.g., single fields of view rather than whole slides), per-tile normalization with `.normalizePercentiles()` is often adequate and avoids the overhead of a full-image read. Switch to `.preprocessGlobal()` when you see discontinuities at tile boundaries on larger images.
+</Tip>
+
+## Deprecated `.preprocess(TileOpCreator)`
+
+Prior to v0.6.0, global normalization was passed via an overloaded `.preprocess(TileOpCreator)` method. This overload is now deprecated and will emit a warning in the log.
+
+```groovy
+// Deprecated — do not use
+.preprocess(StarDist2D.imageNormalizationBuilder().percentiles(0, 99.8).build())
+
+// Correct — use preprocessGlobal() instead (since v0.6.0)
+.preprocessGlobal(StarDist2D.imageNormalizationBuilder().percentiles(0, 99.8).build())
+```
+
+<Note>
+The `preprocess(TileOpCreator)` overload still works and delegates to `preprocessGlobal()`, but it logs a one-time warning via `LogTools.warnOnce`. Update any existing scripts to use `.preprocessGlobal()` to silence the warning and be compatible with future versions.
+</Note>
+
+## Related
+
+- [Cell Expansion and Overlap Resolution](/guides/cell-expansion)
+- [Using BioImage Model Zoo Models](/guides/bioimage-model-zoo)
+- [StarDist2D API reference](/api/stardist2d)
+- [OpCreators API reference](/api/opcreators)
+- [Normalization reference](/reference/normalization)

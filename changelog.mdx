@@ -1,0 +1,53 @@
+---
+title: "QuPath StarDist Extension Changelog and Version Log"
+description: "Version history for the QuPath StarDist Extension, documenting enhancements and bug fixes from v0.3.0 through the current v0.6.0 release."
+---
+
+The QuPath StarDist Extension has evolved alongside QuPath itself, tracking each major QuPath release with compatibility updates, new preprocessing strategies, and fixes for the most common issues reported by users. Each version targets a specific minimum QuPath version, so check the per-release notes below before upgrading.
+
+## v0.6.0
+
+### Enhancements
+
+- Fixed the default input tensor layout for TensorFlow SavedModel-format models. Previously, TensorFlow models could produce incorrect output or throw layout errors when no explicit `.layout()` was set. The default is now `"BYXC"` (batch × height × width × channels) for SavedModel directories, matching what TensorFlow StarDist models expect. Tracked in [issue #34](https://github.com/qupath/qupath-extension-stardist/issues/34).
+
+<Note>
+  If you previously worked around TensorFlow layout errors by calling `.layout()` explicitly, verify that the explicit value still matches your model after upgrading, or remove the call to use the corrected default.
+</Note>
+
+## v0.5.0
+
+### Enhancements
+
+- **QuPath v0.5.0 support** — this release requires QuPath v0.5.0 or later.
+- **Improved TensorFlow support via Deep Java Library** — TensorFlow models are now loaded through the Deep Java Library (DJL) integration, providing better compatibility with modern TensorFlow versions and GPU runtimes.
+- **Model name lookup** — you can now specify only the model file name (without the full path) when the model is stored in the QuPath user directory. The extension searches in `<user directory>/stardist/` first, then falls back to `<user directory>/models/`. This makes scripts more portable across machines.
+- **Reduced logging verbosity** — non-essential progress messages have been moved from INFO to DEBUG level. Use `.doLog()` in the builder to restore verbose output if needed.
+
+## v0.4.0
+
+### Enhancements
+
+- **QuPath v0.4.0 support** — this release requires QuPath v0.4.0 or later, and uses the [Deep Java Library extension](https://github.com/qupath/qupath-extension-djl/blob/main/README.md) for model loading.
+- **Bioimage Model Zoo spec initialization** — the builder can now be initialized from a Bioimage Model Zoo YAML specification file, enabling direct use of models published in the Model Zoo format.
+- **Global image preprocessing** — introduced `preprocessGlobal(TileOpCreator)` and the `StarDist2D.imageNormalizationBuilder()` API, allowing normalization statistics to be computed from the full (downsampled) image rather than per tile. Tracked in [issue #20](https://github.com/qupath/qupath-extension-stardist/issues/20). See [Normalization strategies](/reference/normalization) for details.
+- **Per-channel and joint normalization** — `normalizePercentiles(double, double, boolean, double)` gained `perChannel` and `eps` parameters, and the same per-channel option was added to global normalization via `.perChannel()`. Tracked in [issue #14](https://github.com/qupath/qupath-extension-stardist/issues/14).
+- Documentation moved to [qupath.readthedocs.io](https://qupath.readthedocs.io/en/0.4/docs/deep/stardist.html).
+
+## v0.3.2
+
+### Bug fixes
+
+- **Z-stack and time-series plane bug** — fixed a bug where detection applied to a ROI on a z-stack or time-series image would use the default plane (z=0, t=0) for pixel reading when tile padding was greater than zero. This caused incorrect pixels to be processed for non-default planes. See the [image.sc thread](https://forum.image.sc/t/cell-detection-with-stardist-on-2d-stack-images/73264/5) for details.
+
+## v0.3.1
+
+### Bug fixes
+
+- **Invalid scaling operation** — fixed an arithmetic error in the `inputScale` preprocessing step that produced incorrect pixel values. Tracked in [issue #17](https://github.com/qupath/qupath-extension-stardist/issues/17).
+- **GPU memory not released** — `StarDist2D` now implements `AutoCloseable`. Calling `stardist.close()` at the end of a script (or using a try-with-resources block) releases the DNN model and any associated GPU memory. Without this, GPU memory allocated by CUDA-backed runtimes would not be freed until the QuPath process exited. Tracked in [issue #11](https://github.com/qupath/qupath-extension-stardist/issues/11).
+- **Reduced TopologyException occurrences** — several cases that previously triggered JTS `TopologyException` errors during polygon overlap resolution have been eliminated. Further reductions are expected in future QuPath core releases.
+
+## v0.3.0
+
+- First public release of the extension, written to be compatible with QuPath v0.3.0.

@@ -1,0 +1,335 @@
+---
+title: "Complete StarDist2D Builder Configuration Reference"
+description: "Complete reference for all StarDist2D.Builder methods including detection, preprocessing, measurement, and threading configuration options."
+---
+
+`StarDist2D` uses the builder pattern to configure detection before running. You obtain a builder by calling `StarDist2D.builder(modelPath)` with a path to your model, chain as many option methods as needed, and then call `.build()` to produce a ready-to-use detector. Options you omit keep their defaults, so a minimal script needs only a model path and a threshold.
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+
+def stardist = StarDist2D
+    .builder("/path/to/model.pb")
+    .threshold(0.5)
+    .pixelSize(0.5)
+    .measureShape()
+    .measureIntensity()
+    .build()
+
+def imageData = QP.getCurrentImageData()
+stardist.detectObjects(imageData, QP.getSelectedObjects())
+stardist.close()
+```
+
+## Detection parameters
+
+<ParamField path="threshold" type="double" default="0.5">
+  Probability threshold for nucleus detection, between 0 and 1. Detections whose predicted probability falls below this value are discarded. Lower values produce more (and noisier) detections; higher values are more conservative.
+
+  ```groovy
+  .threshold(0.5)
+  ```
+
+  See also `.includeProbability(true)` to record the model confidence as a measurement so you can filter detections later.
+</ParamField>
+
+<ParamField path="pixelSize" type="double" default="NaN">
+  Requested pixel size in microns at which detection is performed. When set, the image is downsampled so that one pixel corresponds to this physical size. Set to `Double.NaN` (the default) to run at the full resolution of the input image.
+
+  ```groovy
+  .pixelSize(0.5)
+  ```
+
+  For a calibrated image in microns, a value of 0.5 µm/px is a typical starting point.
+</ParamField>
+
+<ParamField path="simplify" type="double" default="1.4">
+  Distance threshold used by the Visvalingam–Whyatt algorithm to simplify detected polygon contours. Smaller values preserve more vertices; set to ≤ 0 to disable simplification. Simplification reduces memory usage and can help avoid `TopologyException` errors.
+
+  ```groovy
+  .simplify(1.4)
+  ```
+</ParamField>
+
+<ParamField path="padding" type="int" default="32">
+  Overlap in pixels added around each tile before inference to reduce boundary artifacts. The effective tile size sent to the model is `tileSize + padding × 2`. Nuclei that straddle the original tile boundary are handled by the overlap region.
+
+  ```groovy
+  .padding(32)
+  ```
+</ParamField>
+
+<ParamField path="tileSize" type="int" default="1024">
+  Width and height of the tiles used for detection. The same value is applied to both dimensions. Large tiles require more memory but may improve accuracy for large nuclei.
+
+  ```groovy
+  .tileSize(1024)
+  ```
+
+  You can specify different width and height values using the two-argument overload:
+
+  ```groovy
+  .tileSize(1024, 512)
+  ```
+</ParamField>
+
+<ParamField path="nThreads" type="int" default="-1">
+  Number of threads used for parallel tile processing. The default of `-1` lets the JVM decide based on available processors. Setting this to `1` disables parallelism entirely, which can help when debugging or when the model is not thread-safe.
+
+  ```groovy
+  .nThreads(4)
+  ```
+</ParamField>
+
+## Input channel selection
+
+<ParamField path="channels(int...)" type="int[]">
+  Select image channels to pass to the model by zero-based index. Useful for fluorescence images where only one or a subset of channels should drive detection.
+
+  ```groovy
+  .channels(0)        // first channel only
+  .channels(0, 2)     // channels 0 and 2
+  ```
+</ParamField>
+
+<ParamField path="channels(String...)" type="String[]">
+  Select channels by name as stored in the image metadata. This is an alternative to index-based selection that is more readable when channel names are known.
+
+  ```groovy
+  .channels('DAPI')
+  .channels('DAPI', 'GFP')
+  ```
+</ParamField>
+
+<ParamField path="channels(ColorTransform...)" type="ColorTransform[]">
+  Provide custom `ColorTransform` instances for channel extraction. This allows color deconvolution transforms or other arbitrary channel transforms to be used as model input.
+
+  ```groovy
+  .channels(ColorTransforms.createColorDeconvolvedChannel(stains, 1))
+  ```
+</ParamField>
+
+## Preprocessing
+
+<ParamField path="normalizePercentiles" type="double, double">
+  Apply percentile normalization per tile before inference. Each channel in a tile is rescaled so that the `min` percentile maps to 0 and the `max` percentile maps to 1. This is a fast per-tile operation that may produce boundary artifacts in large images.
+
+  ```groovy
+  .normalizePercentiles(1, 99)
+  ```
+
+  <Warning>
+    Per-tile normalization can cause visible tile boundary artifacts on whole slide images. Consider using `.preprocessGlobal()` for more consistent results across large images.
+  </Warning>
+</ParamField>
+
+<ParamField path="normalizePercentiles" type="double, double, boolean, double">
+  Extended form of percentile normalization with additional control. The `perChannel` flag determines whether each channel is normalized independently (`true`) or jointly across all channels (`false`). The `eps` value is a small constant added to the denominator for numerical stability.
+
+  ```groovy
+  .normalizePercentiles(1, 99, true, 1e-6)
+  ```
+
+  Added in v0.4.0.
+</ParamField>
+
+<ParamField path="preprocess" type="ImageOp...">
+  Append one or more `ImageOp` instances to the preprocessing pipeline. Operations are applied in the order they are added, after channel extraction and after any global preprocessing step. Multiple calls to `.preprocess()` accumulate rather than replace earlier operations.
+
+  ```groovy
+  .preprocess(ImageOps.Filters.gaussianBlur(1))
+  ```
+</ParamField>
+
+<ParamField path="preprocessGlobal" type="TileOpCreator">
+  Set a global preprocessing operation whose parameters are computed from the entire image (or a downsampled version of it) before any tile is processed. The result is a set of `ImageOp` instances applied uniformly to every tile, ensuring consistent normalization across the whole image.
+
+  ```groovy
+  .preprocessGlobal(
+      StarDist2D.imageNormalizationBuilder()
+          .percentiles(0, 99.8)
+          .maxDimension(4096)
+          .build()
+  )
+  ```
+
+  See [Normalization strategies](/reference/normalization) for a full comparison with per-tile normalization.
+</ParamField>
+
+<ParamField path="inputAdd" type="double...">
+  Add a constant offset to all channels (or a per-channel offset if multiple values are supplied) as a preprocessing step. Typically used with a negative value to subtract a background level.
+
+  ```groovy
+  .inputAdd(-128.0)
+  ```
+</ParamField>
+
+<ParamField path="inputSubtract" type="double...">
+  Subtract a constant value from all channels as a preprocessing step. Equivalent to `.inputAdd()` with a negated value, provided as a more readable alternative.
+
+  ```groovy
+  .inputSubtract(128.0)
+  ```
+
+  Added in v0.4.0.
+</ParamField>
+
+<ParamField path="inputScale" type="double...">
+  Multiply channels by a scale factor as a preprocessing step. Combined with `.inputAdd()` or `.inputSubtract()`, this provides a simple global linear normalization.
+
+  ```groovy
+  .inputScale(1.0 / 255.0)
+  ```
+</ParamField>
+
+<ParamField path="layout" type="String">
+  Specify the axis layout expected by the model's input tensor, following the Bioimage Model Zoo convention (e.g. `"yxc"` for channels-last, `"byxc"` for batch + channels-last). In most cases this can be left unset and the correct layout is inferred. For TensorFlow SavedModel directories the default is `"BYXC"`. Fixed in v0.6.0 for TensorFlow models.
+
+  ```groovy
+  .layout("byxc")
+  ```
+</ParamField>
+
+## Cell expansion and overlap
+
+<ParamField path="cellExpansion" type="double" default="NaN">
+  Distance in calibrated units (typically microns) by which to expand detected nuclei outward to approximate the full cell boundary. When set, detected objects become `PathCellObject` instances with a nucleus ROI and a cell ROI. Enabling this unlocks cytoplasm and cell compartment measurements.
+
+  ```groovy
+  .cellExpansion(5.0)
+  ```
+
+  <Warning>
+    Cell expansion is experimental and uses a Voronoi-based approach to resolve overlaps. Results depend heavily on the density and morphology of cells in the image.
+  </Warning>
+
+  See [Cell expansion guide](/guides/cell-expansion) for worked examples.
+</ParamField>
+
+<ParamField path="cellConstrainScale" type="double" default="NaN">
+  Limit cell expansion relative to the nucleus size. Only values greater than 1 are meaningful. A value of `1.5` allows the cell boundary to extend at most 1.5× the nucleus radius beyond the nucleus edge, preventing runaway expansion into cell-free areas.
+
+  ```groovy
+  .cellConstrainScale(1.5)
+  ```
+</ParamField>
+
+<ParamField path="ignoreCellOverlaps" type="boolean" default="false">
+  When `true`, skip the Voronoi-based overlap resolution step after cell expansion. Cells may overlap in the output. Useful when you want the raw expanded regions without the resolution step.
+
+  ```groovy
+  .ignoreCellOverlaps(false)
+  ```
+</ParamField>
+
+<ParamField path="constrainToParent" type="boolean" default="true">
+  When `true` (the default), nuclei and expanded cells are clipped to the boundary of the parent annotation in which detection is run. Set to `false` to allow detections to extend beyond the parent.
+
+  ```groovy
+  .constrainToParent(false)
+  ```
+</ParamField>
+
+## Classification
+
+<ParamField path="classify(String)" type="String">
+  Assign all detected objects a single `PathClass` by name. This is a convenience wrapper around `.classify(PathClass)`.
+
+  ```groovy
+  .classify("Tumor")
+  ```
+</ParamField>
+
+<ParamField path="classify(PathClass)" type="PathClass">
+  Assign all detected objects a specific `PathClass`. If `.classifications(Map)` is also set, the model-predicted class takes precedence and this global class is applied only to objects whose model output index is not covered by the map.
+
+  ```groovy
+  .classify(PathClass.fromString("Tumor"))
+  ```
+</ParamField>
+
+<ParamField path="classifications" type="Map<Integer, PathClass>">
+  Map StarDist model output class indices to QuPath `PathClass` objects. This is used when the model produces a multi-class prediction alongside the detection probability.
+
+  ```groovy
+  .classifications([0: PathClass.fromString("Background"),
+                    1: PathClass.fromString("Tumor"),
+                    2: PathClass.fromString("Stroma")])
+  ```
+</ParamField>
+
+<ParamField path="classificationNames" type="Map<Integer, String>">
+  Convenience version of `.classifications()` that accepts class names as strings instead of `PathClass` objects.
+
+  ```groovy
+  .classificationNames([0: "Background", 1: "Tumor", 2: "Stroma"])
+  ```
+</ParamField>
+
+<ParamField path="keepClassifiedBackground" type="boolean" default="false">
+  When using `.classifications()`, detections assigned to class index 0 (background) are discarded by default. Set this to `true` to retain them.
+
+  ```groovy
+  .keepClassifiedBackground(true)
+  ```
+</ParamField>
+
+<ParamField path="createAnnotations" type="void">
+  Generate annotation objects instead of the default detection objects. When cell expansion is also enabled, the nucleus is included as a child annotation of the cell annotation.
+
+  ```groovy
+  .createAnnotations()
+  ```
+</ParamField>
+
+## Measurements
+
+<ParamField path="measureShape" type="void">
+  Enable shape measurements for each detected object. The measurements added include area, perimeter, circularity, solidity, and max/min caliper diameters. See [Shape and intensity measurements](/reference/measurements) for the full list.
+
+  ```groovy
+  .measureShape()
+  ```
+</ParamField>
+
+<ParamField path="measureIntensity()" type="void">
+  Enable the default set of intensity measurements (mean, median, min, max, and standard deviation) for all selected compartments and all image channels.
+
+  ```groovy
+  .measureIntensity()
+  ```
+</ParamField>
+
+<ParamField path="measureIntensity(Collection)" type="Collection<Measurements>">
+  Enable a specific subset of intensity measurements, selected from the `ObjectMeasurements.Measurements` enum values (`MEAN`, `MEDIAN`, `MIN`, `MAX`, `STD_DEV`).
+
+  ```groovy
+  .measureIntensity([Measurements.MEAN, Measurements.STD_DEV])
+  ```
+</ParamField>
+
+<ParamField path="compartments" type="Compartments...">
+  Specify which cell compartments are measured when `.measureIntensity()` is enabled. Requires `.cellExpansion()` to be set for compartments other than `NUCLEUS`. Available values: `NUCLEUS`, `CYTOPLASM`, `CELL`, `MEMBRANE`.
+
+  ```groovy
+  .compartments(Compartments.NUCLEUS, Compartments.CYTOPLASM)
+  ```
+</ParamField>
+
+<ParamField path="includeProbability" type="boolean" default="false">
+  When `true`, adds the model's detection probability as a measurement named `"Detection probability"` on each object. Useful when running with a low threshold and filtering high-confidence detections afterward.
+
+  ```groovy
+  .includeProbability(true)
+  ```
+</ParamField>
+
+## Debugging
+
+<ParamField path="doLog" type="void">
+  Emit progress messages at the INFO log level rather than the default DEBUG level. Enabling this makes detection progress visible in the QuPath log panel without changing the log level globally.
+
+  ```groovy
+  .doLog()
+  ```
+</ParamField>

@@ -1,0 +1,140 @@
+---
+title: "Fluorescence Nucleus Detection with StarDist in QuPath"
+description: "Detect nuclei in fluorescence microscopy images using StarDist with single-channel extraction by channel name or index and nucleus cell expansion."
+---
+
+Fluorescence microscopy images are typically multi-channel, with each channel representing a distinct fluorophore. StarDist fluorescence models expect a single channel as input, so you must select the channel containing the nuclear stain — commonly DAPI, Hoechst, or a nuclear marker — before inference. The bundled `StarDistFluorescence.groovy` script shows how to extract a channel by name, normalize, detect nuclei, and optionally expand detected nuclei outward to approximate full cell boundaries for cytoplasm intensity measurements.
+
+## Complete script
+
+The following script is taken directly from `StarDistFluorescence.groovy`. Replace `/path/to/model.pb` with a single-channel model such as `dsb2018_heavy_augment.pb` and update `'DAPI'` to match the channel name in your image.
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.scripting.QP
+
+// IMPORTANT! Replace this with the path to your StarDist model
+// that takes a single channel as input (e.g. dsb2018_heavy_augment.pb)
+// You can find some at https://github.com/qupath/models
+// (Check credit & reuse info before downloading)
+def modelPath = "/path/to/model.pb"
+
+// Customize how the StarDist detection should be applied
+// Here some reasonable default options are specified
+def stardist = StarDist2D
+    .builder(modelPath)
+    .channels('DAPI')            // Extract channel called 'DAPI'
+    .normalizePercentiles(1, 99) // Percentile normalization
+    .threshold(0.5)              // Probability (detection) threshold
+    .pixelSize(0.5)              // Resolution for detection
+    .cellExpansion(5)            // Expand nuclei to approximate cell boundaries
+    .measureShape()              // Add shape measurements
+    .measureIntensity()          // Add cell measurements (in all compartments)
+    .build()
+
+// Define which objects will be used as the 'parents' for detection
+// Use QP.getAnnotationObjects() if you want to use all annotations, rather than selected objects
+def pathObjects = QP.getSelectedObjects()
+
+// Run detection for the selected objects
+def imageData = QP.getCurrentImageData()
+if (pathObjects.isEmpty()) {
+    QP.getLogger().error("No parent objects are selected!")
+    return
+}
+stardist.detectObjects(imageData, pathObjects)
+stardist.close() // This can help clean up & regain memory
+println('Done!')
+```
+
+## Channel selection
+
+The `.channels()` builder method extracts one or more channels from the image before passing data to the model.
+
+<Tabs>
+  <Tab title="Select by name">
+    ```groovy
+    .channels('DAPI')
+    ```
+
+    Extracts the channel whose name matches `'DAPI'` exactly (case-sensitive). Channel names are set in **Image > Edit channel names** in QuPath, or are read from the image file metadata. This is the most readable option when working with named multiplex panels.
+  </Tab>
+  <Tab title="Select by index">
+    ```groovy
+    .channels(0)
+    ```
+
+    Extracts the channel at the given zero-based index — `0` for the first channel, `1` for the second, and so on. Use this when channel names are not available or are inconsistent across files.
+  </Tab>
+</Tabs>
+
+<Note>
+  Omitting `.channels()` entirely passes all image channels to the model. This is appropriate only if the model was trained on multi-channel input. Most pre-trained StarDist models for fluorescence expect exactly one channel.
+</Note>
+
+## Cell expansion
+
+`.cellExpansion(5)` expands each detected nucleus outward by 5 microns (in the same units as the image pixel calibration) to estimate the full cell boundary. The expansion uses a Voronoi-based approach to resolve overlaps between neighbouring cells, ensuring that expanded regions do not overlap.
+
+### When to use cell expansion
+
+Cell expansion is most useful when you want intensity measurements in compartments **outside** the nucleus:
+
+- Measuring cytoplasmic marker intensity (e.g. a membrane or cytoplasm stain in a second channel)
+- Quantifying co-localisation between a nuclear stain and a cytoplasmic stain
+- Reporting per-cell statistics that include both nucleus and surrounding cytoplasm
+
+When cell expansion is active, `.measureIntensity()` reports statistics for every available compartment: nucleus, cytoplasm, and whole cell. Without cell expansion, only the nucleus is measured.
+
+<Tip>
+  For IHC images where you want to measure DAB intensity within the nucleus itself (not the cytoplasm), cell expansion combined with `.cellConstrainScale()` gives more controlled results. See [IHC Cell Detection with Color Deconvolution](/guides/ihc-detection) for a worked example.
+</Tip>
+
+<Warning>
+  Cell expansion is described in the source as "rather experimental, relying heavily on JTS and a convoluted method of resolving overlaps using a Voronoi tessellation." Results are generally good for well-separated cells, but inspect detections carefully in densely packed regions.
+</Warning>
+
+## Tuning tips
+
+<AccordionGroup>
+  <Accordion title="Bright or saturated nuclei">
+    If your nuclear stain is very bright or occasionally saturated, the default `normalizePercentiles(1, 99)` may map the brightest pixels beyond the model's expected range. Try tightening the upper percentile: `.normalizePercentiles(1, 99.8)` or `.normalizePercentiles(1, 99.9)` to preserve more dynamic range in bright images.
+  </Accordion>
+
+  <Accordion title="Dim or low-contrast nuclei">
+    For dimly stained nuclei — common in aged tissue blocks or antibody panels with weak signal — lower the `threshold` to `0.3`–`0.4` so that the model accepts lower-confidence predictions. You can also add `.includeProbability(true)` and filter detections post-hoc in the measurements table.
+  </Accordion>
+
+  <Accordion title="Varying signal across the slide">
+    Per-tile percentile normalization (`normalizePercentiles`) adapts to local intensity variations, which is helpful when signal varies across a large slide. If tile-level normalization causes artifacts at boundaries, switch to [global normalization](/guides/global-normalization) using `preprocessGlobal`.
+  </Accordion>
+
+  <Accordion title="Adjusting cell expansion distance">
+    The expansion distance in `.cellExpansion(5)` is in microns. Increase it for large cells (e.g. hepatocytes, cardiomyocytes) or decrease it for small, densely packed cells. To prevent the expanded region from growing beyond a fixed multiple of the nucleus size, add `.cellConstrainScale(1.5)` — this caps expansion at 1.5× the nucleus radius.
+  </Accordion>
+</AccordionGroup>
+
+## Cleanup
+
+Call `stardist.close()` after detection completes to release the model from memory. This is especially important when processing many images in a batch loop.
+
+```groovy
+stardist.close() // This can help clean up & regain memory
+```
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="H&E detection" icon="droplet" href="/guides/he-detection">
+    RGB model detection for hematoxylin and eosin stained slides
+  </Card>
+  <Card title="IHC detection" icon="flask" href="/guides/ihc-detection">
+    Color deconvolution preprocessing for brightfield IHC images
+  </Card>
+  <Card title="Cell expansion" icon="expand" href="/guides/cell-expansion">
+    Detailed guide to nucleus-to-cell expansion and overlap resolution
+  </Card>
+  <Card title="Builder options reference" icon="code" href="/reference/builder-options">
+    Full list of all StarDist2D builder configuration options
+  </Card>
+</CardGroup>

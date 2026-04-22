@@ -1,0 +1,160 @@
+---
+title: 'Cell Expansion and Voronoi Overlap Resolution in StarDist'
+description: 'Expand StarDist nucleus detections outward to approximate full cell boundaries using cellExpansion, cellConstrainScale, and Voronoi overlap resolution.'
+---
+
+StarDist detects nuclei — the dense, well-stained inner compartment of a cell. For many analysis tasks, however, you need measurements from the surrounding cytoplasm or membrane: receptors, cytoplasmic markers, membrane-bound proteins, and so on. Cell expansion lets you grow each nucleus detection outward by a fixed distance to approximate the full cell boundary, giving you the cytoplasm and membrane as separately measurable compartments alongside the nucleus itself.
+
+## How `.cellExpansion(distance)` works
+
+The expansion distance is specified in the same units as the image's pixel calibration — typically microns. The extension converts this to pixels at runtime using the image's averaged pixel size. Each nucleus polygon is expanded outward by that distance using JTS geometry operations (`CellTools.estimateCellBoundary`), producing a larger "cell" polygon that encloses the original nucleus polygon.
+
+```groovy
+def stardist = StarDist2D
+    .builder(modelPath)
+    .preprocessGlobal(
+        StarDist2D.imageNormalizationBuilder()
+            .percentiles(0, 99.8)
+            .maxDimension(4096)
+            .build()
+    )
+    .threshold(0.5)
+    .pixelSize(0.5)
+    .cellExpansion(5.0)          // Expand 5 µm outward from each nucleus
+    .cellConstrainScale(1.5)     // Cell area cannot exceed 1.5× the nucleus area
+    .ignoreCellOverlaps(false)   // Resolve overlapping expanded cells (default)
+    .measureShape()
+    .measureIntensity()
+    .build()
+```
+
+<Warning>
+Cell expansion is described in the source code as "rather experimental, relying heavily on JTS and a convoluted method of resolving overlaps using a Voronoi tessellation." Results are generally good but should be reviewed visually, especially in densely packed tissue where many nuclei are close together.
+</Warning>
+
+## Constraining expansion with `.cellConstrainScale(scale)`
+
+`.cellExpansion()` applies a fixed distance regardless of nucleus size. In tissue where nuclei vary significantly in size, this can cause small nuclei to expand much further (relative to themselves) than large ones. `.cellConstrainScale(scale)` addresses this by setting an upper bound on how large the expanded cell can be relative to the nucleus.
+
+The scale factor applies to the nucleus geometry: a scale of `1.5` means the cell boundary is clipped to a region no larger than the nucleus scaled up by 1.5×. Only values greater than `1.0` are meaningful — a value of `1.0` would prevent any expansion.
+
+```groovy
+.cellExpansion(5.0)       // Expand up to 5 µm
+.cellConstrainScale(1.5)  // But clamp so cell is at most 1.5× the nucleus size
+```
+
+<Tip>
+A `cellConstrainScale` of around `1.5` to `2.0` works well for most tissue types. Start higher (e.g., `3.0`) and reduce if you see cells expanding unrealistically into neighboring cells or empty space.
+</Tip>
+
+## Overlap resolution with Voronoi tessellation
+
+When neighboring cells expand, their boundaries may overlap. The extension resolves these overlaps using Voronoi tessellation via `CellTools.constrainCellOverlaps`. Each cell's expanded region is clipped to the Voronoi cell around that nucleus, so the final cell boundaries are non-overlapping and partition the space between nuclei.
+
+This step runs automatically whenever `.cellExpansion()` is set and `.ignoreCellOverlaps(false)` (the default). It is the most computationally expensive part of the pipeline for densely packed tissue.
+
+### `.ignoreCellOverlaps(boolean)`
+
+Set this to `true` to skip Voronoi-based overlap resolution entirely. Cells will be allowed to overlap. This significantly speeds up detection but produces overlapping cell objects, which can lead to double-counting in downstream measurements.
+
+```groovy
+.ignoreCellOverlaps(true)   // Skip overlap resolution; faster but cells may overlap
+```
+
+Use this only if you know the tissue is sparse enough that overlaps are rare, or if your downstream analysis explicitly handles overlapping detections.
+
+### `.constrainToParent(boolean)`
+
+By default (`true`), both nucleus and cell polygons are clipped to the parent annotation boundary. This prevents cells from expanding beyond the annotated region. Set to `false` to allow expansion beyond the parent.
+
+```groovy
+.constrainToParent(false)   // Allow cells to grow beyond the parent annotation
+```
+
+## Compartments
+
+When cell expansion is enabled, StarDist creates cell objects with a nucleus ROI and a full cell ROI. The extension uses these to define four measurable compartments:
+
+| Compartment | Description |
+|---|---|
+| `Nucleus` | The inner star-convex polygon detected by StarDist |
+| `Cytoplasm` | The ring between the nucleus boundary and the cell boundary |
+| `Cell` | The full expanded cell region (nucleus + cytoplasm) |
+| `Membrane` | The outer boundary ring of the cell |
+
+All four compartments are measured by default when `.measureIntensity()` is called. Use `.compartments()` to restrict which compartments are included:
+
+```groovy
+import qupath.lib.analysis.features.ObjectMeasurements.Compartments
+
+def stardist = StarDist2D
+    .builder(modelPath)
+    .preprocessGlobal(
+        StarDist2D.imageNormalizationBuilder()
+            .percentiles(0, 99.8)
+            .maxDimension(4096)
+            .build()
+    )
+    .threshold(0.5)
+    .pixelSize(0.5)
+    .cellExpansion(5.0)
+    .cellConstrainScale(1.5)
+    .measureIntensity()
+    .compartments(Compartments.NUCLEUS, Compartments.CYTOPLASM)  // Only nucleus and cytoplasm
+    .build()
+```
+
+<Note>
+`.compartments()` has no effect unless both `.measureIntensity()` and `.cellExpansion()` are set. Without cell expansion, only the nucleus region exists, and compartment selection is irrelevant.
+</Note>
+
+## Full example
+
+The following is a complete script using cell expansion with both overlap resolution and compartment-specific intensity measurements:
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.analysis.features.ObjectMeasurements.Compartments
+import qupath.lib.scripting.QP
+
+def modelPath = "/path/to/model.pb"
+
+def stardist = StarDist2D
+    .builder(modelPath)
+    .preprocessGlobal(
+        StarDist2D.imageNormalizationBuilder()
+            .percentiles(0, 99.8)
+            .maxDimension(4096)
+            .build()
+    )
+    .threshold(0.5)
+    .pixelSize(0.5)
+    .tileSize(1024)
+    .cellExpansion(5.0)
+    .cellConstrainScale(1.5)
+    .ignoreCellOverlaps(false)
+    .constrainToParent(true)
+    .measureShape()
+    .measureIntensity()
+    .compartments(Compartments.NUCLEUS, Compartments.CYTOPLASM)
+    .includeProbability(true)
+    .doLog()
+    .build()
+
+def pathObjects = QP.getSelectedObjects()
+def imageData = QP.getCurrentImageData()
+if (pathObjects.isEmpty()) {
+    QP.getLogger().error("No parent objects are selected!")
+    return
+}
+stardist.detectObjects(imageData, pathObjects)
+stardist.close()
+println('Done!')
+```
+
+## Related
+
+- [Global Image Normalization for StarDist](/guides/global-normalization)
+- [Using BioImage Model Zoo Models](/guides/bioimage-model-zoo)
+- [StarDist2D API reference](/api/stardist2d)
+- [Measurements reference](/reference/measurements)

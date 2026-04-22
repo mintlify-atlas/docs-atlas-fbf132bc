@@ -1,0 +1,193 @@
+---
+title: "Troubleshooting StarDist Detection and Model Issues"
+description: "Solutions for common StarDist problems including GPU memory leaks, poor detection quality, topology exceptions, and model loading errors."
+---
+
+Most StarDist problems fall into a small number of categories: resource management issues after detection, quality issues caused by incorrect normalization or pixel size, topology errors from complex polygon geometry, and model loading failures. This page covers the most frequently reported issues and their solutions.
+
+<AccordionGroup>
+
+  <Accordion title="GPU memory is not released after detection">
+    StarDist holds a reference to the loaded `DnnModel` for the lifetime of the `StarDist2D` instance. When using a GPU-backed runtime (such as TensorFlow with CUDA), the GPU memory allocated to the model is not freed until the model is explicitly closed.
+
+    **Fix:** call `stardist.close()` after detection is complete. Because `StarDist2D` implements `AutoCloseable`, you can also use a try-with-resources block:
+
+    ```groovy
+    def stardist = StarDist2D.builder(modelPath).threshold(0.5).build()
+    try {
+        stardist.detectObjects(imageData, pathObjects)
+    } finally {
+        stardist.close()
+    }
+    ```
+
+    Or, more concisely, simply add `stardist.close()` at the end of your script (assuming you have named your variable `stardist`):
+
+    ```groovy
+    stardist.detectObjects(imageData, pathObjects)
+    stardist.close()
+    println('Done!')
+    ```
+
+    This issue was tracked in [issue #11](https://github.com/qupath/qupath-extension-stardist/issues/11) and the fix was released in v0.3.1.
+  </Accordion>
+
+  <Accordion title="TopologyException errors during detection">
+    A `TopologyException` is thrown by the JTS geometry library when a polygon operation (such as intersection or difference) encounters geometrically invalid polygons. These tend to arise with highly complex star-convex polygon predictions.
+
+    **Mitigations:**
+
+    - Ensure you are using v0.3.1 or later, which reduced many occurrences.
+    - Increase the polygon simplification distance to reduce vertex count:
+
+    ```groovy
+    .simplify(2.0)    // default is 1.4; higher = fewer vertices
+    ```
+
+    - If errors persist, try reducing tile size or padding to avoid very large padded regions.
+
+    Remaining occurrences may be eliminated in future QuPath core releases. When a `TopologyException` occurs for an individual nucleus, that nucleus is dropped and a warning is logged rather than crashing the entire run.
+  </Accordion>
+
+  <Accordion title="Poor detection quality (missed cells or false positives)">
+    Detection quality depends primarily on three factors: the probability threshold, the pixel size, and the match between the model's expected input and the preprocessed image.
+
+    **Check the threshold first.** The default of 0.5 is a reasonable starting point but may need adjustment:
+
+    ```groovy
+    .threshold(0.3)    // detect more, including weaker candidates
+    .threshold(0.7)    // stricter, fewer false positives
+    ```
+
+    Enable `.includeProbability(true)` to record model confidence, then examine the distribution of detected probabilities in the measurement table to choose a better cutoff.
+
+    **Check the pixel size.** If the pixel size does not match what the model was trained on, detections will be the wrong size or missed entirely:
+
+    ```groovy
+    .pixelSize(0.5)    // run at 0.5 µm/px — check your model's training resolution
+    ```
+
+    **Check normalization.** If intensities in your tiles are outside the range the model expects, quality will drop. Try switching from per-tile to global normalization (see [Normalization strategies](/reference/normalization)):
+
+    ```groovy
+    .preprocessGlobal(
+        StarDist2D.imageNormalizationBuilder()
+            .percentiles(0, 99.8)
+            .maxDimension(4096)
+            .build()
+    )
+    ```
+
+    **Check the channel selection.** For fluorescence images, make sure you are selecting the correct channel for the model:
+
+    ```groovy
+    .channels('DAPI')
+    ```
+  </Accordion>
+
+  <Accordion title="Tile boundary artifacts in detection output">
+    If you see a regular grid pattern in the detected objects — with more or fewer detections near tile edges — the cause is almost always per-tile normalization. Each tile is normalized independently, so tiles in brighter or dimmer image regions receive different scale factors, making detection sensitivity vary across the slide.
+
+    **Fix:** replace `.normalizePercentiles()` with `.preprocessGlobal()` using `imageNormalizationBuilder`:
+
+    ```groovy
+    // Remove this:
+    .normalizePercentiles(1, 99)
+
+    // Add this instead:
+    .preprocessGlobal(
+        StarDist2D.imageNormalizationBuilder()
+            .percentiles(0, 99.8)
+            .maxDimension(4096)
+            .build()
+    )
+    ```
+
+    Global normalization computes percentiles once from a downsampled view of the entire image and applies them uniformly to every tile. See [Normalization strategies](/reference/normalization) for a full explanation.
+  </Accordion>
+
+  <Accordion title="Wrong detections on z-stack or time-series images">
+    In versions before v0.3.2, when running detection on a region of interest located on a specific z-plane or time point, the extension would fall back to using the default plane (z=0, t=0) if the tile padding was greater than zero. This caused incorrect pixels to be read for detection.
+
+    **Fix:** upgrade to v0.3.2 or later. The bug was fixed so that the correct image plane is always used.
+
+    If you are on v0.3.2+ and still see unexpected results on a specific plane, verify that the parent annotation used for detection is located on the correct z-plane or time point.
+  </Accordion>
+
+  <Accordion title="Model not found or failed to load">
+    `StarDist2D.builder()` accepts three forms of model path:
+
+    1. **Full absolute path** to the model file or directory.
+    2. **Model name only**, if the model is stored in `<QuPath user directory>/stardist/` — the preferred location.
+    3. **Model name only**, if the model is stored in `<QuPath user directory>/models/`.
+
+    ```groovy
+    // Full path
+    .builder("/home/user/models/stardist/dsb2018_heavy_augment.pb")
+
+    // Name only (file must be in user dir/stardist/ or user dir/models/)
+    .builder("dsb2018_heavy_augment.pb")
+    ```
+
+    If multiple files with the same name exist in the user directory, the one in `stardist/` takes priority over `models/`. A warning is logged if more than one match is found.
+
+    Model name lookup was added in v0.5.0. If you are on an older version, you must use the full path.
+
+    <Note>
+      Check the QuPath log for messages beginning with `"I couldn't find the model file"` or `"Unable to load StarDist model"` to confirm whether the error is a path issue or a file format issue.
+    </Note>
+  </Accordion>
+
+  <Accordion title="TensorFlow layout errors or wrong output shape">
+    StarDist models exported in TensorFlow SavedModel format require the input tensor to have a specific axis layout. If the layout is wrong, the model may throw an error or silently produce garbled output.
+
+    For TensorFlow SavedModel directories (a directory rather than a `.pb` file), the default layout as of v0.6.0 is `"BYXC"` (batch × height × width × channels). This was fixed in [issue #34](https://github.com/qupath/qupath-extension-stardist/issues/34).
+
+    If you are using a model that expects a different layout, specify it explicitly:
+
+    ```groovy
+    .layout("byxc")     // no batch dimension, channels-last
+    .layout("BYXC")     // with batch dimension, channels-last
+    ```
+
+    The layout string follows the [Bioimage Model Zoo](https://bioimage.io) axis convention. Refer to the model's documentation or YAML spec for the correct value.
+  </Accordion>
+
+  <Accordion title="Script runs slowly">
+    Detection speed depends on tile size, thread count, image resolution, and model complexity. A few settings to tune:
+
+    **Thread count:** by default StarDist uses all available processors. On machines where the model is memory-intensive, limiting threads can actually increase throughput by reducing contention:
+
+    ```groovy
+    .nThreads(4)
+    ```
+
+    Set `.nThreads(1)` to disable all parallelism for debugging.
+
+    **Tile size:** smaller tiles mean more tiles to process, adding overhead. Larger tiles use more memory. The default of 1024 is a good balance:
+
+    ```groovy
+    .tileSize(2048)    // fewer, larger tiles — faster on machines with enough memory
+    ```
+
+    **Pixel size:** running at a lower resolution (larger pixel size) dramatically reduces the number of pixels processed:
+
+    ```groovy
+    .pixelSize(0.5)    // run at 0.5 µm/px instead of full resolution
+    ```
+
+    **Global normalization overhead:** `preprocessGlobal()` reads a downsampled version of the entire image once before detection starts. For very large WSIs this can take several seconds but is not repeated per tile. Adjust `.maxDimension()` to control how much data is read:
+
+    ```groovy
+    .preprocessGlobal(
+        StarDist2D.imageNormalizationBuilder()
+            .maxDimension(2048)    // read less data for faster startup
+            .percentiles(0, 99.8)
+            .build()
+    )
+    ```
+  </Accordion>
+
+</AccordionGroup>
+
+If none of the above resolves your issue, check the [QuPath image.sc forum](https://forum.image.sc/tag/qupath) or open an issue on the [extension GitHub repository](https://github.com/qupath/qupath-extension-stardist).

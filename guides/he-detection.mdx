@@ -1,0 +1,152 @@
+---
+title: "H&E Nucleus Detection with StarDist in QuPath"
+description: "Detect nuclei in hematoxylin and eosin stained whole-slide images using StarDist with a 3-channel RGB model and per-tile percentile normalization."
+---
+
+H&E (hematoxylin and eosin) staining is the most common stain in diagnostic pathology. Because H&E slides are RGB color images, StarDist detection uses a three-channel model trained on RGB input — no channel selection or color deconvolution required. The bundled `StarDistHE.groovy` script configures the builder with percentile normalization, a probability threshold, and shape and intensity measurements, giving you a working detection pipeline with minimal setup.
+
+## What model to use
+
+For H&E images you need a model that accepts 3-channel RGB input. The recommended starting point is `he_heavy_augment.pb`, available from the [QuPath models repository](https://github.com/qupath/models). Check the credit and reuse information for each model before downloading.
+
+<Note>
+  Single-channel fluorescence models such as `dsb2018_heavy_augment.pb` will **not** work directly on H&E images. Use those models only with explicit channel extraction or color deconvolution preprocessing — see [IHC Cell Detection with Color Deconvolution](/guides/ihc-detection).
+</Note>
+
+## Complete script
+
+The following script is taken directly from `StarDistHE.groovy`. Replace `/path/to/model.pb` with the absolute path to your downloaded model file before running.
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.scripting.QP
+
+// IMPORTANT! Replace this with the path to your StarDist model
+// that takes 3 channel RGB as input (e.g. he_heavy_augment.pb)
+// You can find some at https://github.com/qupath/models
+// (Check credit & reuse info before downloading)
+def modelPath = "/path/to/model.pb"
+
+// Customize how the StarDist detection should be applied
+// Here some reasonable default options are specified
+def stardist = StarDist2D
+    .builder(modelPath)
+    .normalizePercentiles(1, 99) // Percentile normalization
+    .threshold(0.5)              // Probability (detection) threshold
+    .pixelSize(0.5)              // Resolution for detection
+    .measureShape()              // Add shape measurements
+    .measureIntensity()          // Add nucleus measurements
+    .build()
+
+// Define which objects will be used as the 'parents' for detection
+// Use QP.getAnnotationObjects() if you want to use all annotations, rather than selected objects
+def pathObjects = QP.getSelectedObjects()
+
+// Run detection for the selected objects
+def imageData = QP.getCurrentImageData()
+if (pathObjects.isEmpty()) {
+    QP.getLogger().error("No parent objects are selected!")
+    return
+}
+stardist.detectObjects(imageData, pathObjects)
+stardist.close() // This can help clean up & regain memory
+println('Done!')
+```
+
+## Builder options explained
+
+<AccordionGroup>
+  <Accordion title="normalizePercentiles(1, 99)">
+    Scales each tile's pixel intensities so that the 1st percentile maps to 0 and the 99th percentile maps to 1. This makes the detection robust to variations in staining intensity across different slides and scanners without requiring manually tuned constants.
+
+    Normalization is applied **per tile**, which works well for most H&E images. If you have large regions of uniform background (for example, glass or fat), tile-level normalization can occasionally produce false detections at tile boundaries. In those cases, consider [global normalization](/guides/global-normalization) using `preprocessGlobal` instead.
+  </Accordion>
+
+  <Accordion title="threshold(0.5)">
+    The probability threshold controls which model predictions are accepted as detections. The model assigns each candidate nucleus a probability between 0 and 1; only candidates with a probability above this threshold are kept.
+
+    - **Lower values** (e.g. `0.3`) accept more candidates, recovering dim or weakly stained nuclei but increasing false positives.
+    - **Higher values** (e.g. `0.7`) are more selective, reducing false positives but potentially missing nuclei in densely packed regions.
+
+    A value of `0.5` is a reasonable default for most H&E slides. See [tuning tips](#tuning-tips) below.
+  </Accordion>
+
+  <Accordion title="pixelSize(0.5)">
+    Sets the resolution at which the model runs, in the same units as the image calibration (typically microns). StarDist was typically trained at around 0.5 µm/pixel; running at a different resolution can degrade accuracy.
+
+    If your image is calibrated at a finer resolution (e.g. 0.25 µm/pixel), this parameter causes QuPath to downsample the image before inference, which also reduces memory usage and processing time.
+
+    Omit this option to run at the full native image resolution, which is rarely beneficial and significantly slower.
+  </Accordion>
+
+  <Accordion title="measureShape()">
+    Adds geometric measurements to each detected nucleus object, including area, perimeter, circularity, max and min caliper diameter, and solidity. These are computed from the star-convex polygon ROI at the image's native calibration.
+
+    Shape measurements are useful for downstream filtering — for example, excluding very small or very elongated objects that are unlikely to be true nuclei.
+  </Accordion>
+
+  <Accordion title="measureIntensity()">
+    Adds intensity statistics (mean, median, min, max, and standard deviation) for each image channel within the detected nucleus region. For H&E images the measurements are computed on the original RGB channels.
+
+    When used with `.cellExpansion()`, intensity measurements are computed separately within the nucleus and cytoplasm compartments. Without cell expansion, only the nucleus compartment is measured.
+
+    See [Fluorescence Nucleus Detection](/guides/fluorescence-detection) for an example using cell expansion.
+  </Accordion>
+</AccordionGroup>
+
+## Selecting parent objects
+
+<Steps>
+  <Step title="Draw annotations in QuPath">
+    Use the QuPath annotation tools to draw one or more annotation objects over the tissue regions where you want to detect nuclei. Detection will run within these boundaries.
+  </Step>
+  <Step title="Select annotations before running">
+    Click on an annotation to select it, or use **Edit > Select All** to select all annotations. The script reads `QP.getSelectedObjects()`, so only selected objects are used as parent regions.
+
+    <Tip>
+      To run detection in all annotations without selecting them manually, replace `QP.getSelectedObjects()` with `QP.getAnnotationObjects()` in the script.
+    </Tip>
+  </Step>
+  <Step title="Run the script">
+    Open the QuPath Script Editor (**Automate > Script Editor**), paste or open the script, and click **Run**.
+  </Step>
+</Steps>
+
+<Warning>
+  If no objects are selected when the script runs, it logs `"No parent objects are selected!"` and exits without detecting anything. Always verify that at least one annotation is selected before running.
+</Warning>
+
+## Tuning tips
+
+<Tip>
+  **Dense tissue (tonsil, lymph node, tumor):** nuclei are tightly packed and may partially overlap. Try lowering `threshold` to `0.3`–`0.4` to recover nuclei that the model assigns borderline probabilities. If you get too many false positives, add `.includeProbability(true)` and filter detections in the QuPath measurements table after the fact.
+</Tip>
+
+<Tip>
+  **Sparse tissue (fat, stroma, fibrous areas):** increase `threshold` to `0.6`–`0.7` to reduce false positives in regions with low nuclear density. You can also draw tight annotations around the regions of interest to restrict where detection runs.
+</Tip>
+
+<Tip>
+  **Staining variability across batches:** if slides from different staining batches behave inconsistently, consider switching from per-tile percentile normalization to [global normalization](/guides/global-normalization), which computes normalization statistics from the whole image rather than each tile independently.
+</Tip>
+
+## Cleanup
+
+Always call `stardist.close()` after detection completes. This releases the loaded model from memory, which can be substantial for TensorFlow SavedModel format. Forgetting to call `close()` in a loop over multiple images will gradually exhaust available memory.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Fluorescence detection" icon="circle-dot" href="/guides/fluorescence-detection">
+    Single-channel detection with DAPI or other fluorescence stains and cell expansion
+  </Card>
+  <Card title="IHC detection" icon="droplet" href="/guides/ihc-detection">
+    Color deconvolution preprocessing for brightfield IHC images
+  </Card>
+  <Card title="Builder options reference" icon="code" href="/reference/builder-options">
+    Full list of all StarDist2D builder configuration options
+  </Card>
+  <Card title="Global normalization" icon="sliders" href="/guides/global-normalization">
+    Compute normalization statistics across the whole image to avoid tile artifacts
+  </Card>
+</CardGroup>

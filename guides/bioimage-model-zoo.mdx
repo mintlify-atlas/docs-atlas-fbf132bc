@@ -1,0 +1,151 @@
+---
+title: 'Using BioImage Model Zoo Models in QuPath StarDist'
+description: 'Load StarDist models from the BioImage Model Zoo by pointing to a YAML spec file — preprocessing, tile size, and padding configure automatically.'
+---
+
+The [BioImage Model Zoo](https://bioimage.io) is a community repository of pretrained deep-learning models for bioimage analysis. It hosts several StarDist models for nucleus and cell detection in fluorescence and brightfield microscopy. Each model is packaged with a machine-readable YAML specification file (`rdf.yaml` or similar) that describes its inputs, outputs, preprocessing steps, and recommended thresholds. The QuPath StarDist extension reads this specification automatically, so you do not need to manually configure tile size, padding, or normalization — they are set from the spec.
+
+## How to load a BioImage Model Zoo model
+
+Pass the path to the model's `.yaml` or `.yml` spec file directly to `StarDist2D.builder()`. The extension detects that it is a YAML file and delegates to `StarDistBioimageIo` to parse the spec and initialize the builder.
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.scripting.QP
+
+// Point to the rdf.yaml (or .yml) spec file for the downloaded model
+def modelPath = "/path/to/your-stardist-model/rdf.yaml"
+
+def stardist = StarDist2D
+    .builder(modelPath)   // Auto-configures from the YAML spec
+    .pixelSize(0.5)       // Resolution for detection (still set manually)
+    .cellExpansion(5.0)
+    .cellConstrainScale(1.5)
+    .measureShape()
+    .measureIntensity()
+    .build()
+
+def pathObjects = QP.getSelectedObjects()
+def imageData = QP.getCurrentImageData()
+if (pathObjects.isEmpty()) {
+    QP.getLogger().error("No parent objects are selected!")
+    return
+}
+stardist.detectObjects(imageData, pathObjects)
+stardist.close()
+println('Done!')
+```
+
+You can also pass the path to the directory that contains the YAML file — the extension will find the spec file automatically.
+
+## What gets auto-configured from the spec
+
+<Steps>
+  <Step title="Input axes and tile size">
+    The spec declares the input tensor shape (e.g., `byxc` for batch × height × width × channels). The extension reads the target tile width and height from the input shape definition and calls `.tileSize()` on the builder automatically.
+  </Step>
+
+  <Step title="Preprocessing">
+    The spec's `preprocessing` list is read and converted to a global normalization op where possible:
+
+    - **`ScaleRange`** → `imageNormalizationBuilder().percentiles(min, max)` — percentile normalization computed from the full downsampled image.
+    - **`ZeroMeanUnitVariance`** → `imageNormalizationBuilder().zeroMeanUnitVariance(true)` — zero-mean unit variance normalization computed from the full downsampled image.
+    - **`ScaleLinear`** — handled as a fallback; the extension currently logs a warning and may treat it as a zero-mean step.
+
+    In all cases the statistics are computed globally (not per tile), using the default `maxDim` of `4096`.
+  </Step>
+
+  <Step title="Output halo → padding">
+    The spec's output tensor declares a `halo` — the number of border pixels that the model's output is unreliable for. The extension reads the halo in the x and y axes and passes it as `.padding()` on the builder, so tile boundaries are handled correctly.
+  </Step>
+
+  <Step title="TensorFlow SavedModel weights path">
+    The spec's `weights` section points to the TensorFlow SavedModel bundle. The extension resolves this path relative to the spec file's location. If a `.zip` version is found alongside an already-unzipped directory, the unzipped directory is preferred.
+  </Step>
+
+  <Step title="StarDist probability threshold">
+    The spec's `config.stardist.thresholds.prob` value is read and passed to `.threshold()` on the builder. You can override this by calling `.threshold()` explicitly after the builder is returned.
+  </Step>
+</Steps>
+
+## Overriding auto-configuration
+
+When loading from a YAML spec, you can still call any builder method after the auto-configuration to override the values derived from the spec. For example, to override the probability threshold or add cell expansion:
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.scripting.QP
+
+def modelPath = "/path/to/your-stardist-model/rdf.yaml"
+
+// StarDist2D.builder() auto-configures from the YAML spec,
+// then you can override any value by chaining builder methods.
+def stardist = StarDist2D
+    .builder(modelPath)
+    .threshold(0.3)          // override the threshold from the spec
+    .pixelSize(0.5)          // resolution (not from spec; set manually)
+    .cellExpansion(5.0)
+    .measureShape()
+    .measureIntensity()
+    .build()
+
+def pathObjects = QP.getSelectedObjects()
+def imageData = QP.getCurrentImageData()
+if (pathObjects.isEmpty()) {
+    QP.getLogger().error("No parent objects are selected!")
+    return
+}
+stardist.detectObjects(imageData, pathObjects)
+stardist.close()
+println('Done!')
+```
+
+<Note>
+`StarDistBioimageIo` is a package-private class and cannot be imported or called directly from Groovy scripts. All interaction with BioImage Model Zoo specs happens through `StarDist2D.builder(String modelPath)`, which automatically detects `.yaml`/`.yml` paths and delegates internally.
+</Note>
+
+The normalization settings derived from the spec (such as `maxDim` for the downsampled statistics read) are controlled internally. To see what was configured, enable verbose logging with `.doLog()` and check the QuPath log for messages emitted during the build step.
+
+## Storing models in the QuPath user directory
+
+Since v0.5.0, models stored in the QuPath user directory can be referenced by filename alone — you do not need to specify the full path. The extension searches the user directory recursively and prefers files found in a `stardist/` or `models/` subdirectory.
+
+```groovy
+// Full path — always works
+def modelPath = "/home/user/QuPath/v0.5/stardist/he_heavy_augment/rdf.yaml"
+
+// Filename only — works if the file is in the QuPath user directory
+def modelPath = "rdf.yaml"
+```
+
+<Tip>
+Organize your models under `<QuPath user directory>/stardist/` for the most predictable lookup behavior. If multiple files with the same name are found, a warning is logged and the file in the `stardist/` directory is preferred over one in `models/`, which is preferred over any other location.
+</Tip>
+
+## TensorFlow requirement
+
+BioImage Model Zoo StarDist models use TensorFlow SavedModel format. To use them you must have the [Deep Java Library extension](https://github.com/qupath/qupath-extension-djl) installed alongside the StarDist extension. Without it, loading a SavedModel directory will fail.
+
+<Warning>
+Frozen `.pb` model files (the older OpenCV-compatible format) do not require TensorFlow or the DJL extension. If you are using a `.pb` file, pass it directly to `StarDist2D.builder()` — do not point to a YAML spec file.
+</Warning>
+
+## Finding available models
+
+Visit the [BioImage Model Zoo](https://bioimage.io) and filter by **Application: StarDist** to browse available pretrained models. A curated set of QuPath-compatible models is also maintained at [https://github.com/qupath/models](https://github.com/qupath/models).
+
+<CardGroup cols={2}>
+  <Card title="BioImage Model Zoo" icon="globe" href="https://bioimage.io">
+    Browse and download pretrained StarDist models from the community repository.
+  </Card>
+  <Card title="QuPath models repository" icon="github" href="https://github.com/qupath/models">
+    Curated models tested for compatibility with QuPath's StarDist extension.
+  </Card>
+</CardGroup>
+
+## Related
+
+- [Global Image Normalization for StarDist](/guides/global-normalization)
+- [Cell Expansion and Overlap Resolution](/guides/cell-expansion)
+- [StarDist2D API reference](/api/stardist2d)
+- [OpCreators API reference](/api/opcreators)

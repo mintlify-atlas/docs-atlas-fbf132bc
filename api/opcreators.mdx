@@ -1,0 +1,149 @@
+---
+title: "OpCreators — Whole-Image Normalization API for StarDist"
+description: "API reference for OpCreators and ImageNormalizationBuilder, used to compute normalization statistics across a full downsampled image."
+---
+
+`OpCreators` is a helper class that bridges the gap between per-tile `ImageOp` processing and whole-image statistics. Because a standard `ImageOp` only sees the pixels of the current tile, global normalization (e.g. percentiles computed across an entire WSI) is impossible using ordinary ops. `OpCreators` provides the `TileOpCreator` interface and its `ImageNormalizationBuilder` implementation to compute normalization constants from a downsampled view of the full image, then emit lightweight `ImageOp` instances (subtract + multiply) that are applied to every tile uniformly. It is designed for use with [`StarDist2D.Builder.preprocessGlobal()`](/api/stardist2d#preprocessglobal), and its primary entry point is the static factory `OpCreators.imageNormalizationBuilder()`.
+
+<Note>
+  `OpCreators` is currently in development. If it proves sufficiently useful it is likely to be refined and moved into the core QuPath software in a future release.
+</Note>
+
+---
+
+## `OpCreators.TileOpCreator` interface
+
+```java
+public static interface TileOpCreator
+```
+
+A strategy interface for creating tile-level `ImageOp` instances whose parameters are derived from an entire image (or a masked region of it) rather than a single tile.
+
+### `createOps(ImageDataOp, ImageData, ROI, ImagePlane)`
+
+```java
+public List<ImageOp> createOps(
+    ImageDataOp op,
+    ImageData<BufferedImage> imageData,
+    ROI mask,
+    ImagePlane plane
+) throws IOException
+```
+
+Reads a downsampled version of the image through `op`, computes normalization statistics, and returns one or more `ImageOp` instances (typically a subtract followed by a multiply) that encode those statistics. The returned ops are inserted into the per-tile preprocessing pipeline before inference.
+
+| Parameter | Description |
+|-----------|-------------|
+| `op` | The `ImageDataOp` that extracts and transforms channels; determines what pixels are read. |
+| `imageData` | The image to read statistics from. |
+| `mask` | Optional `ROI` used to restrict the region considered (only when `useMask(true)` is set on the builder). |
+| `plane` | The 2D image plane to use; falls back to the mask plane, then the default plane if not provided. |
+
+---
+
+## `OpCreators.imageNormalizationBuilder()`
+
+```java
+public static ImageNormalizationBuilder imageNormalizationBuilder()
+```
+
+Static factory that returns a new `ImageNormalizationBuilder`. Also accessible as `StarDist2D.imageNormalizationBuilder()`, which is a direct delegate to this method.
+
+---
+
+## `ImageNormalizationBuilder`
+
+```java
+public static class ImageNormalizationBuilder
+```
+
+A fluent builder for constructing a `TileOpCreator` that normalizes images using statistics computed from the whole image at a reduced resolution. Two normalization strategies are supported: percentile-based min/max rescaling (default) and zero-mean unit-variance standardization.
+
+### Builder methods
+
+<ParamField path="percentiles(double minPercentile, double maxPercentile)" type="double, double">
+  Compute normalization using image percentiles. The downsampled image is scanned to find the pixel values at `minPercentile` and `maxPercentile`, which become the subtract offset and the scale denominator respectively. Selecting percentiles rather than the absolute min and max makes the normalization robust to outlier pixels.
+
+  Setting percentiles overrides any previous `zeroMeanUnitVariance()` call.
+</ParamField>
+
+<ParamField path="zeroMeanUnitVariance()" type="(no parameter)">
+  Enables zero-mean unit-variance standardization: the image mean is subtracted and the result is divided by the standard deviation (plus `eps` for stability). Equivalent to `zeroMeanUnitVariance(true)`. Overrides any previous `percentiles()` call.
+</ParamField>
+
+<ParamField path="zeroMeanUnitVariance(boolean doZeroMeanUnitVariance)" type="boolean">
+  Conditionally enables zero-mean unit-variance normalization. Pass `false` to revert to percentile normalization.
+</ParamField>
+
+<ParamField path="perChannel(boolean perChannel)" type="boolean" default="false">
+  When `true`, statistics are computed independently for each channel, producing per-channel subtract and scale values. When `false` (default), a single pair of statistics is computed across all channels jointly.
+</ParamField>
+
+<ParamField path="eps(double eps)" type="double" default="1e-6">
+  Small constant added to the denominator during normalization to prevent division by zero. Relevant when min ≈ max (flat regions) or when the standard deviation is near zero.
+</ParamField>
+
+<ParamField path="downsample(double downsample)" type="double" default="NaN (auto)">
+  Explicit downsample factor used when reading the image for statistics computation. Must be `>= 1.0`. For whole-slide images, a value of `1.0` will almost certainly exhaust memory; use `maxDimension()` instead to let the builder choose an appropriate factor automatically. Set an explicit value only when you need precise control over the resolution used for statistics.
+</ParamField>
+
+<ParamField path="maxDimension(int maxDimension)" type="int" default="2048">
+  Maximum pixel width or height allowed for the downsampled image used in statistics computation. When `downsample` is not set explicitly, the builder computes `downsample = max(width, height) / maxDimension` (with a minimum of `1.0`). Increase this value to use a finer resolution for statistics at the cost of more memory.
+</ParamField>
+
+<ParamField path="useMask(boolean useMask)" type="boolean" default="false">
+  When `true`, pixels outside the `ROI` mask passed to `createOps()` are excluded from statistics computation (set to `NaN` before the percentile or mean/std calculation). This focuses normalization on the tissue region rather than background.
+</ParamField>
+
+<ParamField path="build()" type="TileOpCreator">
+  Constructs and returns a `TileOpCreator` — either a `PercentileTileOpCreator` or a `ZeroMeanVarianceTileOpCreator` depending on which normalization strategy was selected.
+</ParamField>
+
+---
+
+## Usage example
+
+The following example shows `ImageNormalizationBuilder` integrated with `StarDist2D.Builder.preprocessGlobal()` for a complete detection workflow:
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.scripting.QP
+
+def modelPath = "/path/to/model.pb"
+
+// Build a global normalization op: compute 0th–99.8th percentiles
+// across the image downsampled so its largest dimension is <= 4096 px.
+def globalNorm = StarDist2D.imageNormalizationBuilder()
+    .percentiles(0, 99.8)      // min and max percentile
+    .perChannel(false)         // normalize jointly across channels
+    .maxDimension(4096)        // auto-downsample to fit within 4096 px
+    .useMask(true)             // restrict stats to the parent ROI
+    .eps(1e-6)                 // numerical stability constant
+    .build()                   // returns a TileOpCreator
+
+def stardist = StarDist2D
+    .builder(modelPath)
+    .preprocessGlobal(globalNorm)   // whole-image normalization
+    .threshold(0.5)
+    .pixelSize(0.5)
+    .build()
+
+def imageData = QP.getCurrentImageData()
+def pathObjects = QP.getSelectedObjects()
+stardist.detectObjects(imageData, pathObjects)
+stardist.close()
+```
+
+<Tip>
+  For zero-mean unit-variance normalization (common in fluorescence imaging), replace `.percentiles(0, 99.8)` with `.zeroMeanUnitVariance()`.
+</Tip>
+
+---
+
+## Deprecation note
+
+<Warning>
+  `Builder.preprocess(TileOpCreator)` was deprecated in v0.6.0. Any scripts that pass a `TileOpCreator` to `.preprocess()` will log a warning and delegate to `.preprocessGlobal()`. Update existing scripts to use `.preprocessGlobal(TileOpCreator)` directly to silence the warning and ensure forward compatibility.
+</Warning>
+
+See also the [StarDist2D builder reference](/api/stardist2d) for full builder documentation, and the [global normalization guide](/guides/global-normalization) for background on why tile-independent normalization matters.

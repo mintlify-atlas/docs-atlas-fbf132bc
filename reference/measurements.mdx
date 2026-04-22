@@ -1,0 +1,155 @@
+---
+title: "StarDist Shape and Intensity Measurement Reference"
+description: "Understand which shape and intensity measurements StarDist can add to detected objects, and how to select compartments for cytoplasmic measurements."
+---
+
+StarDist can enrich every detected object with quantitative measurements at the time of detection. These measurements are stored directly on the `PathObject` and become immediately available in QuPath's measurement table for downstream analysis — classifier training, scripted filtering, or export. Two categories of measurement are available: shape measurements that describe the geometry of the detected region, and intensity measurements that summarize pixel values within a compartment.
+
+## Shape measurements
+
+Enable shape measurements with `.measureShape()` in the builder:
+
+```groovy
+def stardist = StarDist2D
+    .builder(modelPath)
+    .threshold(0.5)
+    .pixelSize(0.5)
+    .measureShape()
+    .build()
+```
+
+Shape measurements are added by `ObjectMeasurements.addShapeMeasurements()` and use the pixel calibration of the image to express results in calibrated units where possible. The measurements include:
+
+| Measurement | Description |
+|---|---|
+| Area | Area of the detected ROI, in calibrated units (µm² when calibration is available). |
+| Perimeter | Perimeter length of the ROI boundary. |
+| Circularity | Ratio of area to perimeter² scaled to 1 for a perfect circle. Values closer to 1 indicate rounder shapes. |
+| Solidity | Ratio of ROI area to the area of its convex hull. Values closer to 1 indicate convex, compact shapes. |
+| Max caliper | Maximum caliper diameter (the longest extent across the shape). |
+| Min caliper | Minimum caliper diameter (the shortest extent across the shape). |
+
+Shape measurements are available for all detected objects regardless of whether cell expansion is enabled.
+
+## Intensity measurements
+
+Enable intensity measurements with `.measureIntensity()`:
+
+```groovy
+def stardist = StarDist2D
+    .builder(modelPath)
+    .threshold(0.5)
+    .pixelSize(0.5)
+    .cellExpansion(5.0)
+    .measureIntensity()
+    .build()
+```
+
+Calling `.measureIntensity()` with no arguments enables the full default set of statistics. You can restrict to a specific subset using the `Collection<Measurements>` overload:
+
+```groovy
+import qupath.lib.analysis.features.ObjectMeasurements.Measurements
+
+.measureIntensity([Measurements.MEAN, Measurements.STD_DEV])
+```
+
+The available `Measurements` enum values are:
+
+| Enum value | Measurement added |
+|---|---|
+| `MEAN` | Mean pixel intensity per channel. |
+| `MEDIAN` | Median pixel intensity per channel. |
+| `MIN` | Minimum pixel intensity per channel. |
+| `MAX` | Maximum pixel intensity per channel. |
+| `STD_DEV` | Standard deviation of pixel intensities per channel. |
+
+Measurements are computed separately for each image channel and for each selected compartment, producing names such as `"Nucleus: DAPI mean"` or `"Cytoplasm: Channel 2 std dev"`.
+
+<Note>
+  When the image has color deconvolution stains defined, intensity measurements are computed on the deconvolved stain channels rather than the raw RGB channels, enabling direct IHC quantification.
+</Note>
+
+## Compartments
+
+Compartments define the spatial region within which intensity measurements are computed. They are selected with `.compartments()`:
+
+```groovy
+import qupath.lib.analysis.features.ObjectMeasurements.Compartments
+
+.compartments(Compartments.NUCLEUS, Compartments.CYTOPLASM)
+```
+
+By default, all available compartments are measured. The available compartments are:
+
+<AccordionGroup>
+  <Accordion title="Nucleus">
+    The nucleus compartment is the polygon detected directly by the StarDist model. It is always available regardless of whether `.cellExpansion()` is set. Nucleus measurements reflect the interior of the predicted star-convex polygon.
+  </Accordion>
+
+  <Accordion title="Cytoplasm">
+    The cytoplasm compartment is the ring-shaped region between the nucleus boundary and the expanded cell boundary. It requires `.cellExpansion(double)` to be set. Cytoplasm measurements are useful for cytoplasmic markers such as ER or PR in breast pathology.
+  </Accordion>
+
+  <Accordion title="Cell">
+    The cell compartment is the full expanded region defined by `.cellExpansion()`, encompassing both the nucleus and cytoplasm. Requires `.cellExpansion(double)` to be set.
+  </Accordion>
+
+  <Accordion title="Membrane">
+    The membrane compartment is a thin band computed along the periphery of the cell boundary. Requires `.cellExpansion(double)` to be set. Useful for membrane-localized markers such as HER2.
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  The `CYTOPLASM`, `CELL`, and `MEMBRANE` compartments are only meaningful when `.cellExpansion(double)` is also configured. If cell expansion is not set, these compartments fall back to the nucleus ROI.
+</Warning>
+
+## Detection probability
+
+The model's predicted confidence for each detection can be recorded as a measurement:
+
+```groovy
+.includeProbability(true)
+```
+
+This adds a measurement named `"Detection probability"` to every detected object. It is especially useful when you run detection with a low threshold to capture borderline candidates, then filter by probability afterward using a QuPath measurement classifier or a script.
+
+## Accessing measurements in QuPath
+
+Once detection is complete, measurements appear in:
+
+- **Measurement table**: open via *Analyze → Show detection measurements*. Columns correspond to individual measurements; rows correspond to detected objects.
+- **Annotation measurements**: if `.createAnnotations()` was used, measurements appear in the annotation measurement table instead.
+- **Scripting**: access measurements on any `PathObject` via `pathObject.getMeasurementList()`.
+
+## Example: DAB intensity in the nucleus for IHC
+
+The following script detects nuclei and measures DAB stain intensity in the nucleus compartment, a common workflow for quantifying nuclear IHC markers such as Ki-67 or p53:
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.analysis.features.ObjectMeasurements.Compartments
+import qupath.lib.analysis.features.ObjectMeasurements.Measurements
+
+def modelPath = "/path/to/he_heavy_augment.pb"
+
+def stardist = StarDist2D
+    .builder(modelPath)
+    .threshold(0.5)
+    .pixelSize(0.5)
+    .normalizePercentiles(1, 99)
+    .cellExpansion(3.0)
+    .compartments(Compartments.NUCLEUS)      // measure only the nucleus
+    .measureIntensity([Measurements.MEAN])   // DAB mean in nucleus
+    .measureShape()
+    .includeProbability(true)
+    .build()
+
+def imageData = QP.getCurrentImageData()
+stardist.detectObjects(imageData, QP.getSelectedObjects())
+stardist.close()
+println('Done!')
+```
+
+After running this script, each detected cell object will have a `"Nucleus: DAB mean"` measurement (assuming color deconvolution stains are set for the image) that you can use in a measurement classifier to separate DAB-positive from DAB-negative cells.
+
+See the [builder options reference](/reference/builder-options) for full details on all measurement-related builder methods, and the [cell expansion guide](/guides/cell-expansion) for how compartments are constructed geometrically.

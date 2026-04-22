@@ -1,80 +1,150 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quickstart: Detect Nuclei with StarDist in QuPath"
+description: "Get from installation to running your first StarDist nucleus detection in QuPath with this step-by-step guide using a pre-trained H&E model."
 ---
 
-## Get started in three steps
+This guide walks you through running StarDist nucleus detection on a brightfield H&E whole-slide image. By the end, you will have a working Groovy script that detects nuclei inside a selected annotation, adds shape and intensity measurements to each detected object, and cleans up GPU memory after inference.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before you begin, make sure you have:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- **QuPath v0.5.0 or later** installed. See the [QuPath website](https://qupath.github.io) for downloads.
+- **The StarDist extension installed.** Follow the [installation guide](/installation) if you haven't done this yet.
+- **A pre-trained StarDist model.** For H&E images, download `he_heavy_augment.pb` (or another 3-channel RGB model) from [github.com/qupath/models](https://github.com/qupath/models). Check the credit and reuse information before downloading.
+- **An H&E whole-slide image** open in a QuPath project, with at least one annotation drawn in the viewer.
 
-### Step 2: Deploy your changes
+## The H&E detection script
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+The script below is taken directly from the bundled `StarDistHE.groovy` template. You can also open it inside QuPath via **Extensions > StarDist > StarDist H&E nucleus detection script**.
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```groovy StarDistHE.groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.scripting.QP
+ 
+// IMPORTANT! Replace this with the path to your StarDist model
+// that takes 3 channel RGB as input (e.g. he_heavy_augment.pb)
+// You can find some at https://github.com/qupath/models
+// (Check credit & reuse info before downloading)
+def modelPath = "/path/to/model.pb"
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+// Customize how the StarDist detection should be applied
+// Here some reasonable default options are specified
+def stardist = StarDist2D
+    .builder(modelPath)
+    .normalizePercentiles(1, 99) // Percentile normalization
+    .threshold(0.5)              // Probability (detection) threshold
+    .pixelSize(0.5)              // Resolution for detection
+    .measureShape()              // Add shape measurements
+    .measureIntensity()          // Add nucleus measurements
+    .build()
+	 
+// Define which objects will be used as the 'parents' for detection
+// Use QP.getAnnotationObjects() if you want to use all annotations, rather than selected objects
+def pathObjects = QP.getSelectedObjects()
+ 
+// Run detection for the selected objects
+def imageData = QP.getCurrentImageData()
+if (pathObjects.isEmpty()) {
+    QP.getLogger().error("No parent objects are selected!")
+    return
+}
+stardist.detectObjects(imageData, pathObjects)
+stardist.close() // This can help clean up & regain memory
+println('Done!')
+```
 
-### Step 3: Go live
+## Step-by-step walkthrough
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+<Steps>
+  <Step title="Set the model path">
+    Replace `"/path/to/model.pb"` with the absolute path to your downloaded model file on disk.
+
+    ```groovy
+    def modelPath = "/home/user/models/he_heavy_augment.pb"
+    ```
+
+    <Tip>
+      As of extension v0.5.0, you can also specify just the model file name (without the full path) if the model is stored in a `stardist` or `models` subdirectory inside your QuPath user directory.
+    </Tip>
+  </Step>
+  <Step title="Configure the builder">
+    The `StarDist2D.builder(modelPath)` call returns a builder that lets you chain configuration methods before calling `.build()`.
+
+    | Method | What it does |
+    |---|---|
+    | `.normalizePercentiles(1, 99)` | Normalizes pixel intensities between the 1st and 99th percentile of each tile, reducing the effect of staining variation |
+    | `.threshold(0.5)` | Sets the minimum detection probability. Increase to detect only high-confidence nuclei; decrease to detect more nuclei with lower confidence |
+    | `.pixelSize(0.5)` | Sets the resolution (in microns per pixel) at which detection runs. Should match the pixel size used to train your model |
+    | `.measureShape()` | Adds nucleus shape measurements (area, perimeter, circularity, etc.) to each detected object |
+    | `.measureIntensity()` | Adds per-channel intensity measurements within the detected nucleus region |
+  </Step>
+  <Step title="Select parent annotations">
+    The script runs detection inside whatever objects are currently selected in the QuPath viewer.
+
+    ```groovy
+    def pathObjects = QP.getSelectedObjects()
+    ```
+
+    Select one or more annotations in the viewer before running the script. To run detection inside every annotation regardless of selection, replace this line with:
+
+    ```groovy
+    def pathObjects = QP.getAnnotationObjects()
+    ```
+  </Step>
+  <Step title="Run detection">
+    Open the QuPath **Script Editor** (**Automate > Script Editor**), paste the script (or open it via **Extensions > StarDist > StarDist H&E nucleus detection script**), then click **Run**.
+
+    The script will:
+    1. Check that at least one parent object is selected.
+    2. Run StarDist inference tile-by-tile across each selected annotation.
+    3. Add the detected nucleus objects as children of each parent annotation.
+    4. Print `Done!` to the script log when complete.
+  </Step>
+  <Step title="Explore the results">
+    When detection finishes, switch to the **Annotations** or **Hierarchy** tab in QuPath's left panel to see the detected objects. You can:
+
+    - Click any detected nucleus in the viewer to inspect its measurements.
+    - Open **Measure > Show detection measurements** to view a table of all nuclei and their shape and intensity values.
+    - Export measurements via **File > Export measurements** for downstream analysis.
+  </Step>
+</Steps>
+
+## GPU memory cleanup
+
+The script calls `stardist.close()` after detection completes. This is important when running on a GPU — without it, CUDA memory may not be released until QuPath exits.
+
+```groovy
+stardist.detectObjects(imageData, pathObjects)
+stardist.close() // This can help clean up & regain memory
+```
+
+<Warning>
+  Always include `stardist.close()` at the end of your scripts when running on a GPU. Omitting it can cause CUDA out-of-memory errors if you run the script multiple times in the same QuPath session.
+</Warning>
+
+## Common adjustments
+
+<Note>
+  The values above are reasonable defaults for many H&E slides, but you will likely need to tune `threshold` and `pixelSize` for your specific model and tissue type. Refer to the documentation that accompanies your model for recommended settings.
+</Note>
+
+**Detecting too many or too few nuclei?** Adjust `.threshold()`. A value closer to `1.0` is more selective; a value closer to `0.0` detects more objects including low-confidence ones.
+
+**Detections appear too large or too small?** Adjust `.pixelSize()` to match the pixel size (in microns) that the model was trained on. A mismatch here is a common source of poor results.
+
+**Want cell boundaries, not just nuclei?** Add `.cellExpansion(5)` to grow nucleus detections outward and approximate cell boundaries. See the [fluorescence detection guide](/guides/fluorescence-detection) for an example.
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="H&E detection guide" icon="microscope" href="/guides/he-detection">
+    Detailed guide to preprocessing, thresholding, and measurement options for H&E images
+  </Card>
+  <Card title="Fluorescence detection guide" icon="sparkles" href="/guides/fluorescence-detection">
+    Adapt StarDist for DAPI or other single-channel fluorescence images
+  </Card>
+  <Card title="API reference" icon="code" href="/api/stardist2d">
+    Full reference for every StarDist2D builder method and its accepted values
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

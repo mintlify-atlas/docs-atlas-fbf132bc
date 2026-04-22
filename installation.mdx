@@ -1,0 +1,80 @@
+---
+title: "Install the QuPath StarDist Extension for QuPath"
+description: "Download and install the StarDist extension JAR into QuPath v0.5.0 or later to enable deep learning nucleus and cell detection on whole-slide images."
+---
+
+Installing the StarDist extension adds deep learning nucleus detection to QuPath by dropping a single JAR file into your QuPath user directory. No Python environment or separate runtime is required — the extension runs entirely within QuPath using either TensorFlow (via the Deep Java Library extension) or a compatible model format.
+
+## Prerequisites
+
+- **QuPath v0.5.0 or later.** The current extension release is written for QuPath v0.5.0. Earlier versions are not supported.
+- **Deep Java Library extension** (optional). Required only if you want to run TensorFlow (`.pb`) models. You can install it the same way as the StarDist extension.
+- A pre-trained StarDist model file. You can download community models from [github.com/qupath/models](https://github.com/qupath/models) — check the credit and reuse information before downloading.
+
+## Installing from a JAR release
+
+<Steps>
+  <Step title="Download the JAR">
+    Go to the [StarDist extension releases page](https://github.com/qupath/qupath-extension-stardist/releases) and download the latest `qupath-extension-stardist-[version].jar` file.
+  </Step>
+  <Step title="Drag the JAR onto QuPath">
+    Open QuPath, then drag the downloaded `.jar` file directly onto the main QuPath window and drop it there.
+
+    <Note>
+      If this is your first time installing a QuPath extension, you will be prompted to choose a QuPath user directory. QuPath copies the JAR into that directory automatically.
+    </Note>
+  </Step>
+  <Step title="Restart QuPath">
+    Close and reopen QuPath. You do not need to restart your computer — restarting QuPath is sufficient for the extension to load.
+  </Step>
+  <Step title="Verify the installation">
+    Open the **Extensions** menu in QuPath. You should see a **StarDist** entry. Selecting it reveals the bundled script templates you can use as starting points.
+  </Step>
+</Steps>
+
+## Accessing the bundled script templates
+
+Once installed, StarDist ships four ready-to-use Groovy script templates accessible from **Extensions > StarDist**:
+
+| Menu item | Script file | Image type |
+|---|---|---|
+| StarDist H&E nucleus detection script | `StarDistHE.groovy` | Brightfield H&E (RGB) — 3-channel RGB model |
+| StarDist brightfield cell detection script | `StarDistDeconvolved.groovy` | Brightfield IHC — color deconvolution preprocessing |
+| StarDist fluorescence cell detection script | `StarDistFluorescence.groovy` | Fluorescence — single-channel model with channel selection |
+| StarDist full cell detection script | `StarDistTemplate.groovy` | Any — shows every available builder option |
+
+Open any template via **Extensions > StarDist**, then edit it in the QuPath Script Editor before running.
+
+## Building from source
+
+If you need to modify the extension or build a custom version, you can compile it from source using the Gradle wrapper.
+
+```bash
+gradlew clean build
+```
+
+The compiled JAR is written to `build/libs/`. You can then install it by dragging it onto QuPath as described above.
+
+- `clean` removes any previously compiled output.
+- `build` compiles the extension and packages it as a `.jar` file.
+
+<Warning>
+  Building from source requires a JDK compatible with your target QuPath version. Refer to the QuPath developer documentation for the correct JDK version.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first nucleus detection on an H&E image with a complete working script
+  </Card>
+  <Card title="H&E detection guide" icon="microscope" href="/guides/he-detection">
+    In-depth guide to tuning StarDist for brightfield H&E whole-slide images
+  </Card>
+  <Card title="Fluorescence detection guide" icon="sparkles" href="/guides/fluorescence-detection">
+    Configure StarDist for single- and multi-channel fluorescence images
+  </Card>
+  <Card title="API reference" icon="code" href="/api/stardist2d">
+    Complete reference for the StarDist2D builder and all configuration options
+  </Card>
+</CardGroup>

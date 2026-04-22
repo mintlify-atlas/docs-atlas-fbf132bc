@@ -1,0 +1,154 @@
+---
+title: "StarDistBioimageIo — BioImage Model Zoo Support"
+description: "Package-private API for loading StarDist models from BioImage Model Zoo YAML specs, with automatic preprocessing and tile size configuration."
+---
+
+`StarDistBioimageIo` is a package-private helper class that parses [BioImage Model Zoo](https://bioimage.io) YAML model specifications and constructs a pre-configured `StarDist2D.Builder` from the parsed metadata. You do not call it directly — it is invoked automatically whenever you pass a `.yaml` or `.yml` file path (or a directory containing one) to `StarDist2D.builder(String modelPath)`. Understanding what it configures helps you know which builder options are already set and which you may want to override.
+
+<Note>
+  Because `StarDistBioimageIo` is package-private (`class StarDistBioimageIo`, not `public class`), it cannot be imported or called from Groovy scripts. All interaction is through `StarDist2D.builder(String)`. The information here describes the **effects** of passing a YAML path, not a public API to call directly.
+</Note>
+
+---
+
+## What gets auto-configured from the spec
+
+When a BioImage Model Zoo YAML is detected, `StarDistBioimageIo` reads the following fields and configures the builder accordingly:
+
+| YAML spec field | Builder method set |
+|-----------------|--------------------|
+| Input tensor axes (e.g. `"byxc"`) | `layout(String)` |
+| Input tensor target shape (x, y dimensions) | `tileSize(int, int)` |
+| Output tensor halo (x and y) | `padding(int)` |
+| TensorFlow SavedModel weights path | Internal model path (passed to `StarDist2D.builder(String)`) |
+| `stardist.thresholds.prob` from config | `threshold(double)` |
+| Input preprocessing spec | `preprocessGlobal(TileOpCreator)` and/or `preprocess(ImageOp...)` |
+
+<Info>
+  NMS (non-maximum suppression) threshold values present in the spec are logged as a warning and ignored, because custom NMS thresholds are not supported by this implementation.
+</Info>
+
+<Warning>
+  Zipped model directories (`.zip` SavedModel archives) are not supported. If the weights source resolves to a `.zip` path, a warning is logged. Unzip the SavedModel directory manually before pointing StarDist2D at the YAML spec.
+</Warning>
+
+---
+
+## Supported preprocessing spec types
+
+The YAML `preprocessing` list on the input tensor is parsed in order. The **first** preprocessing entry is eligible for promotion to a global (whole-image) `TileOpCreator`; subsequent entries are applied per-tile.
+
+<AccordionGroup>
+  <Accordion title="ScaleRange">
+    Mapped to `OpCreators.imageNormalizationBuilder().percentiles(min, max)`. The `minPercentile` and `maxPercentile` values are read from the spec. The `eps` field is also read. The `axes` field determines `perChannel`: if the axes string contains `"c"`, normalization is joint across channels (`perChannel=false`); otherwise, each channel is normalized independently (`perChannel=true`).
+
+    ```yaml
+    preprocessing:
+      - name: scale_range
+        kwargs:
+          min_percentile: 1.0
+          max_percentile: 99.8
+          eps: 1.0e-6
+          axes: czyx
+    ```
+  </Accordion>
+
+  <Accordion title="ZeroMeanUnitVariance">
+    Mapped to `OpCreators.imageNormalizationBuilder().zeroMeanUnitVariance(true)`. The `axes` field is used to infer `perChannel` using the same logic as `ScaleRange`. Global `maxDim` and `downsample` parameters (see below) are forwarded to the builder.
+
+    ```yaml
+    preprocessing:
+      - name: zero_mean_unit_variance
+        kwargs:
+          axes: czyx
+    ```
+  </Accordion>
+
+  <Accordion title="ScaleLinear">
+    In the current implementation, `ScaleLinear` entries are treated internally the same as `ZeroMeanUnitVariance` for the purpose of determining the normalization strategy. If an unsupported preprocessing type is encountered, an attempt is made to convert it to an `ImageOp` via `BioimageIoTools.transformToOp()`; if that also fails, a warning is logged and the step is skipped.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Optional `params` map
+
+When `StarDistBioimageIo.builder(Map<String, ?> params, ...)` is used internally (e.g. from scripting contexts where the map syntax is supported), two optional keys control the global normalization downsampling:
+
+<ParamField path="maxDim" type="int" default="4096">
+  Maximum pixel dimension (width or height) for the downsampled image used to compute normalization statistics. When the image is larger than this, a downsample factor is computed automatically so that neither dimension exceeds `maxDim`. The default here is `4096`, which is larger than the `ImageNormalizationBuilder` default of `2048`, to better accommodate large histology images.
+</ParamField>
+
+<ParamField path="downsample" type="double" default="NaN (auto)">
+  Explicit downsample factor for the normalization statistics image. When provided, it overrides the `maxDim`-based automatic calculation. Must be a numeric value; any non-numeric value is ignored with a warning.
+</ParamField>
+
+---
+
+## Model storage and name resolution
+
+Absolute paths to YAML files are resolved directly. When only a file **name** is given (no directory component), `StarDist2D.builder(String)` searches the QuPath user directory recursively for a matching filename. Among results, files inside a `stardist/` subdirectory are preferred, followed by files inside a `models/` subdirectory, then any other location.
+
+Recommended directory layout under the QuPath user directory:
+
+```
+<QuPath user directory>/
+└── stardist/
+    ├── he_heavy_augment/
+    │   ├── rdf.yaml
+    │   └── weights_tensorflowhdf5.h5
+    └── dsb2018_heavy_augment/
+        ├── rdf.yaml
+        └── weights_tensorflowhdf5.h5
+```
+
+With this layout, you can load a model by name alone:
+
+```groovy
+// Resolved from <user dir>/stardist/he_heavy_augment/rdf.yaml
+def stardist = StarDist2D.builder("rdf.yaml").build()
+```
+
+---
+
+## Code example
+
+Loading a StarDist model from a BioImage Model Zoo YAML spec with custom normalization parameters:
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.scripting.QP
+
+// Full path to the BioImage Model Zoo YAML file
+def modelPath = "/path/to/stardist_model/rdf.yaml"
+
+// StarDist2D.builder() detects the .yaml extension and delegates to
+// StarDistBioimageIo automatically. Tile size, padding, preprocessing,
+// layout, and probability threshold are all read from the spec.
+def stardist = StarDist2D
+    .builder(modelPath)
+    // You can still override any auto-configured values:
+    .pixelSize(0.5)          // Resolution for detection (microns)
+    .measureShape()          // Add shape measurements
+    .measureIntensity()      // Add intensity measurements
+    .doLog()                 // Enable verbose progress logging
+    .build()
+
+def imageData = QP.getCurrentImageData()
+def pathObjects = QP.getSelectedObjects()
+
+if (pathObjects.isEmpty()) {
+    QP.getLogger().error("No parent objects are selected!")
+    return
+}
+
+stardist.detectObjects(imageData, pathObjects)
+stardist.close()
+println('Done!')
+```
+
+<Tip>
+  After loading from a YAML spec, inspect the QuPath log at `INFO` level to confirm which tile size, padding, preprocessing strategy, and probability threshold were read from the spec. This makes it easy to verify the auto-configuration before overriding values.
+</Tip>
+
+See the [BioImage Model Zoo guide](/guides/bioimage-model-zoo) for a walkthrough of downloading and organizing community models, and the [StarDist2D builder reference](/api/stardist2d) for the full set of builder options you can override after YAML loading.

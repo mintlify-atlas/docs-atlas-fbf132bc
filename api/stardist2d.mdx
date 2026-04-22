@@ -1,0 +1,336 @@
+---
+title: "StarDist2D — Nucleus and Cell Detection Class API"
+description: "Complete API reference for the StarDist2D class and its Builder, including all detection methods, configuration options, and lifecycle management."
+---
+
+`StarDist2D` is the primary entry point for nucleus and cell detection using the StarDist method (Schmidt et al., MICCAI 2018). It implements `AutoCloseable` and uses a fluent builder pattern: you call `StarDist2D.builder(...)` to obtain a `Builder`, chain configuration methods, and finally call `.build()` to construct an immutable detector. Once detection is complete, you **must** call `close()` to release the underlying DNN model and any associated GPU memory.
+
+## Static factory methods
+
+### `StarDist2D.builder(String modelPath)`
+
+```java
+public static Builder builder(String modelPath)
+```
+
+Creates a `Builder` from a file-system path. The path may point to:
+
+- A TensorFlow SavedModel directory
+- A frozen `.pb` file for use with OpenCV's DNN module
+- A BioImage Model Zoo `.yaml` or `.yml` spec file (auto-detected; delegates to [`StarDistBioimageIo`](/api/stardist-bioimageio))
+
+When a YAML spec is detected, the builder is pre-configured with tile size, padding, preprocessing, layout, and probability threshold derived from the spec. If an absolute path is not found, QuPath's user directory is searched for a file with a matching name, preferring files inside `stardist/` or `models/` subdirectories.
+
+---
+
+### `StarDist2D.builder(DnnModel dnn)`
+
+```java
+public static Builder builder(DnnModel dnn)
+```
+
+Creates a `Builder` using a pre-built `DnnModel`. Use this when you need to supply a model from an alternative machine learning library rather than loading from a file path.
+
+---
+
+### `StarDist2D.imageNormalizationBuilder()`
+
+```java
+public static ImageNormalizationBuilder imageNormalizationBuilder()
+```
+
+Convenience delegate to [`OpCreators.imageNormalizationBuilder()`](/api/opcreators). Returns an `ImageNormalizationBuilder` for constructing a global (whole-image) normalization op to pass to [`Builder.preprocessGlobal()`](#preprocessglobal).
+
+---
+
+## Instance methods
+
+### `detectObjects(ImageData, Collection<PathObject>)`
+
+```java
+public void detectObjects(ImageData<BufferedImage> imageData,
+                          Collection<? extends PathObject> parents)
+```
+
+Runs detection within each parent object in the collection. Existing child objects of every parent are replaced with the newly detected objects. A hierarchy update event is fired once all parents have been processed. When more than one parent is provided and `nThreads` is not constrained, parents are processed in parallel using a parallel stream.
+
+---
+
+### `detectObjects(ImageData, PathObject, boolean)`
+
+```java
+public void detectObjects(ImageData<BufferedImage> imageData,
+                          PathObject parent,
+                          boolean fireUpdate)
+```
+
+Runs detection within a single parent object. Set `fireUpdate` to `true` to fire a hierarchy change event on completion, or `false` when batching multiple parents and firing the event yourself afterwards.
+
+---
+
+### `detectObjects(ImageData, ROI)`
+
+```java
+public List<PathObject> detectObjects(ImageData<BufferedImage> imageData,
+                                      ROI roi)
+```
+
+Runs detection within an arbitrary `ROI` and returns the resulting `List<PathObject>`. The detected objects are **not** added to the image hierarchy — the caller is responsible for inserting them. Pass `null` for `roi` to process the entire image. This is the low-level method called internally by both parent-based overloads.
+
+---
+
+### `close()`
+
+```java
+public void close() throws Exception
+```
+
+Releases the underlying `DnnModel`, freeing GPU memory and other native resources. Always call this in a `finally` block or use a try-with-resources statement. Failing to close a `StarDist2D` instance will leak GPU memory.
+
+```groovy
+def stardist = StarDist2D.builder(modelPath).threshold(0.5).build()
+try {
+    stardist.detectObjects(imageData, pathObjects)
+} finally {
+    stardist.close()
+}
+```
+
+---
+
+## Static fields
+
+### `defaultTileSize`
+
+```java
+public static int defaultTileSize = 1024
+```
+
+The default tile width and height in pixels, used when `tileSize` is not explicitly set on the builder. Can be reassigned globally, though per-builder `tileSize()` calls are preferred.
+
+---
+
+## Builder
+
+`StarDist2D.Builder` is returned by the static factory methods and is not instantiated directly. Every method returns `this` for chaining.
+
+### Detection tuning
+
+<ParamField path="threshold" type="double" default="0.5">
+  Probability threshold for accepting a detection, between `0` and `1`. Higher values reduce false positives at the cost of missed detections. See also `includeProbability()` to store the raw probability as a measurement for downstream filtering.
+</ParamField>
+
+<ParamField path="pixelSize" type="double" default="NaN (full resolution)">
+  Target pixel size in the same units as the image's `PixelCalibration` (typically microns). StarDist internally downsamples or upsamples the image to match this pixel size before inference. For images calibrated in microns, `0.5` µm/px is a common starting value. Leave unset to run at the native image resolution.
+</ParamField>
+
+<ParamField path="simplify" type="double" default="1.4">
+  Controls how aggressively nucleus contour polygons are simplified using the Visvalingam–Whyatt algorithm. Larger values remove more vertices, reducing memory use and speeding up downstream geometry operations. Set to `<= 0` to disable simplification entirely.
+</ParamField>
+
+<ParamField path="padding" type="int" default="32">
+  Number of pixels of padding added to each tile edge to reduce boundary artifacts. The actual tile request is enlarged by `pad × 2` in both dimensions; detections that overlap the tile boundary are discarded. The tile width and height must each be greater than `pad * 2`.
+</ParamField>
+
+<ParamField path="tileSize(int tileSize)" type="int" default="1024">
+  Sets the width and height of each tile used for inference (square tiles). Note that each tile is normalized independently by default, so tiling can affect results — consider using `preprocessGlobal()` to normalise across the whole image instead.
+
+  An overload `tileSize(int tileWidth, int tileHeight)` accepts separate width and height values.
+</ParamField>
+
+<ParamField path="nThreads" type="int" default="-1 (unlimited)">
+  Maximum number of threads used for parallel tile processing. Set to `1` to disable multithreading, which can help diagnose threading-related issues with native DNN libraries.
+</ParamField>
+
+---
+
+### Channel selection
+
+<ParamField path="channels(int... channels)" type="int...">
+  Select input channels by 0-based index. For example, `.channels(0)` uses only the first channel. Multiple indices are accepted for multi-channel models.
+</ParamField>
+
+<ParamField path="channels(String... channels)" type="String...">
+  Select input channels by name, as reported by the image server. Useful for fluorescence images where channels have meaningful labels (e.g. `"DAPI"`).
+</ParamField>
+
+<ParamField path="channels(ColorTransform... channels)" type="ColorTransform...">
+  Select or transform channels using `ColorTransform` objects. This is the most flexible option and supports color deconvolution stains, linear combinations, and other custom transforms from `ColorTransforms`.
+</ParamField>
+
+---
+
+### Preprocessing
+
+<ParamField path="normalizePercentiles(double min, double max)" type="double, double">
+  Adds per-tile percentile normalization as a preprocessing step. Applied independently per channel. **Warning:** tile-by-tile normalization can produce artifacts in regions with little contrast. Consider `preprocessGlobal()` for whole-image normalization instead.
+
+  An extended overload `normalizePercentiles(double min, double max, boolean perChannel, double eps)` (since v0.4.0) controls per-channel vs. joint normalization and the epsilon stability constant.
+</ParamField>
+
+<ParamField path="preprocess(ImageOp... ops)" type="ImageOp...">
+  Appends one or more `ImageOp` preprocessing operations that are applied per-tile, after channel extraction and any global normalization. Operations are applied in the order the `preprocess()` calls appear on the builder.
+</ParamField>
+
+<ParamField path="preprocessGlobal(TileOpCreator global)" type="TileOpCreator">
+  Sets a single whole-image preprocessing step that computes normalization statistics across the full (downsampled) image before tile inference begins. Only one global op is permitted; it is applied after channel extraction but before per-tile ops. The intended companion is `OpCreators.imageNormalizationBuilder()`. See [Global Image Normalization](/guides/global-normalization).
+
+  <Note>
+    `preprocess(TileOpCreator)` was deprecated in v0.6.0. Use `preprocessGlobal(TileOpCreator)` instead.
+  </Note>
+</ParamField>
+
+<ParamField path="inputAdd(double... values)" type="double...">
+  Adds a scalar offset to each pixel as a preprocessing step. Accepts either a single value applied to all channels or one value per channel. Typically used with a negative value to shift the baseline. Can be combined with `inputScale()` as an alternative to percentile normalization when global constants are known.
+</ParamField>
+
+<ParamField path="inputSubtract(double... values)" type="double...">
+  Subtracts a scalar offset from each pixel as a preprocessing step (since v0.4.0). Equivalent to `inputAdd()` with negated values, but may read more clearly in scripts.
+</ParamField>
+
+<ParamField path="inputScale(double... values)" type="double...">
+  Multiplies each pixel by a scale factor as a preprocessing step. Accepts a single value or one per channel.
+</ParamField>
+
+<ParamField path="layout" type="String" default="null (auto-detected)">
+  Optional axis layout string following the BioImage Model Zoo convention, e.g. `"yxc"` (channels-last) or `"byxc"` (batch + channels-last). Leave unset in most cases; StarDist2D defaults to `"BYXC"` for TensorFlow SavedModel directories. Set explicitly when loading model formats that differ from this expectation.
+</ParamField>
+
+---
+
+### Cell expansion
+
+<ParamField path="cellExpansion" type="double" default="NaN (no expansion)">
+  Distance in calibrated units (e.g. microns) by which detected nuclei are expanded to estimate the cell boundary. Expansion uses JTS geometry and a Voronoi-based overlap resolution. **Experimental** — results may be inaccurate for tightly packed cells.
+</ParamField>
+
+<ParamField path="cellConstrainScale" type="double" default="NaN (no constraint)">
+  Constrains cell expansion relative to nucleus size. Only meaningful for values `> 1`: the nucleus geometry is scaled by this factor to form an upper bound on cell expansion. Ignored if `cellExpansion` is not set.
+</ParamField>
+
+<ParamField path="ignoreCellOverlaps" type="boolean" default="false">
+  When `false` (default), overlapping expanded cells are resolved using a Voronoi tessellation before being added to the hierarchy. Set to `true` to skip overlap resolution entirely, which is faster but allows cells to overlap.
+</ParamField>
+
+<ParamField path="constrainToParent" type="boolean" default="true">
+  When `true` (default), nucleus and cell geometries are clipped to the boundary of their parent annotation. Set to `false` if detections should be allowed to extend beyond parent boundaries.
+</ParamField>
+
+---
+
+### Classification
+
+<ParamField path="classify(PathClass pathClass)" type="PathClass">
+  Applies a fixed classification to every created object. If a StarDist model that produces per-object classifications is used together with `classifications(Map)`, the model's predicted class takes precedence; `classify()` is only applied to unclassified objects.
+</ParamField>
+
+<ParamField path="classify(String pathClassName)" type="String">
+  Convenience overload of `classify(PathClass)` that accepts a class name string, resolving it via `PathClass.fromString()`.
+</ParamField>
+
+<ParamField path="classifications(Map<Integer, PathClass> classifications)" type="Map<Integer, PathClass>">
+  Maps integer class indices predicted by the model to QuPath `PathClass` objects. Index `0` is conventionally background. Use together with `keepClassifiedBackground()` to control whether background detections are retained.
+</ParamField>
+
+<ParamField path="classificationNames(Map<Integer, String> classifications)" type="Map<Integer, String>">
+  Convenience overload of `classifications(Map)` that accepts a map of index → class name strings, converting each to a `PathClass` internally.
+</ParamField>
+
+<ParamField path="keepClassifiedBackground" type="boolean" default="false">
+  When using `classifications(Map)`, determines whether objects predicted as class `0` (background) are retained. By default they are discarded before overlap resolution.
+</ParamField>
+
+<ParamField path="createAnnotations()" type="(no parameter)">
+  Switches the output object type from detection objects (default) to annotation objects. When `cellExpansion` is set, the nucleus is created as a child annotation of the cell annotation.
+</ParamField>
+
+---
+
+### Measurements
+
+<ParamField path="measureShape()" type="(no parameter)">
+  Adds geometric shape measurements (area, perimeter, circularity, etc.) to each detected object after inference. Calls `ObjectMeasurements.addShapeMeasurements()` using the image's pixel calibration.
+</ParamField>
+
+<ParamField path="measureIntensity()" type="(no parameter)">
+  Adds the default set of intensity measurements — mean, median, min, max, and standard deviation — for all available cell compartments. An overload `measureIntensity(Collection<Measurements> measurements)` accepts an explicit list of `ObjectMeasurements.Measurements` enum values.
+</ParamField>
+
+<ParamField path="compartments(Compartments... compartments)" type="Compartments...">
+  Specifies which cell compartments are used when computing intensity measurements. Only meaningful when both `measureIntensity()` and `cellExpansion()` are active. Accepts values from the `ObjectMeasurements.Compartments` enum (e.g. `NUCLEUS`, `CYTOPLASM`, `CELL`, `MEMBRANE`). Defaults to all compartments.
+</ParamField>
+
+<ParamField path="includeProbability" type="boolean" default="false">
+  When `true`, the model's detection probability score is stored as a `"Detection probability"` measurement on each output object. Useful when running with a low threshold to allow post-hoc filtering.
+</ParamField>
+
+---
+
+### Debugging
+
+<ParamField path="doLog()" type="(no parameter)">
+  Elevates progress messages from `DEBUG` to `INFO` log level. Enables logging of tile counts, thread usage, cell counts, and timing information during a detection run. Has no effect on detection results.
+</ParamField>
+
+---
+
+## Complete usage example
+
+The following example is taken directly from `StarDistTemplate.groovy` and demonstrates a full detection workflow with global normalization, cell expansion, measurements, and classification:
+
+```groovy
+import qupath.ext.stardist.StarDist2D
+import qupath.lib.scripting.QP
+
+// IMPORTANT! Replace with the path to your StarDist model
+def modelPath = "/path/to/model.pb"
+
+def stardist = StarDist2D
+    .builder(modelPath)
+    .preprocessGlobal(                 // Normalize using whole-image statistics
+        StarDist2D.imageNormalizationBuilder()
+            .maxDimension(4096)        // Limit downsampled image size for normalization
+            .percentiles(0, 99.8)      // Percentile range for min/max normalization
+            .build()
+    )
+    .threshold(0.5)              // Probability threshold
+    .pixelSize(0.5)              // Resolution for detection (microns)
+    .tileSize(1024)              // Tile width & height for inference
+    .cellExpansion(5.0)          // Expand nuclei to approximate cells
+    .cellConstrainScale(1.5)     // Limit expansion to 1.5x nucleus size
+    .ignoreCellOverlaps(false)   // Resolve overlapping cells
+    .measureShape()              // Add shape measurements
+    .measureIntensity()          // Add intensity measurements (all compartments)
+    .includeProbability(true)    // Store detection probability for filtering
+    .nThreads(4)                 // Cap parallel threads
+    .simplify(1)                 // Polygon simplification distance
+    .doLog()                     // Verbose logging
+    .createAnnotations()         // Create annotations instead of detections
+    .constrainToParent(false)    // Allow objects to cross parent boundary
+    .classify("Tumor")           // Apply a fixed classification
+    .build()
+
+def pathObjects = QP.getSelectedObjects()
+def imageData = QP.getCurrentImageData()
+
+if (pathObjects.isEmpty()) {
+    QP.getLogger().error("No parent objects are selected!")
+    return
+}
+
+stardist.detectObjects(imageData, pathObjects)
+stardist.close() // Release GPU memory
+println('Done!')
+```
+
+<Tip>
+  For H&E images without global normalization, per-tile percentile normalization is a quick alternative. See `StarDistHE.groovy` for a minimal brightfield example using `.normalizePercentiles(1, 99)`.
+</Tip>
+
+<Warning>
+  Always call `stardist.close()` after detection to release native/GPU memory. For safety, wrap detection in a try/finally block.
+</Warning>
+
+<Note>
+  If you use StarDist in published work, cite both the StarDist paper (Schmidt et al., MICCAI 2018, https://doi.org/10.48550/arXiv.1806.03535) and the QuPath paper (Bankhead et al., 2017, https://doi.org/10.1038/s41598-017-17204-5).
+</Note>
